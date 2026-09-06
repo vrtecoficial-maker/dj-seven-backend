@@ -22,10 +22,9 @@ app.get('/api/stream', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).send('Informe o parâmetro q');
 
-  console.log(`[Stream] Buscando no YouTube: ${query}`);
+  console.log(`[Stream] Buscando: ${query}`);
 
   try {
-    // Busca nativa sem quebra de headers
     const searchResults = await yts(query);
     const video = searchResults.videos && searchResults.videos[0];
 
@@ -36,12 +35,31 @@ app.get('/api/stream', async (req, res) => {
     console.log(`[Stream] Encontrado: ${video.title} (${video.videoId})`);
 
     const youtube = await getYouTube();
-    
-    // Baixa o áudio diretamente pelo ID
-    const stream = await youtube.download(video.videoId, {
-      type: 'audio',
-      quality: 'best'
-    });
+
+    // Clientes que não exigem login em servidores
+    const clientsToTry = ['TV_EMBEDDED', 'ANDROID_VR', 'IOS', 'ANDROID'];
+    let stream = null;
+
+    for (const clientName of clientsToTry) {
+      try {
+        console.log(`[Stream] Tentando cliente: ${clientName}...`);
+        const info = await youtube.getInfo(video.videoId, clientName);
+        stream = await info.download({
+          type: 'audio',
+          quality: 'best'
+        });
+        if (stream) {
+          console.log(`[Stream] Sucesso usando cliente: ${clientName}`);
+          break;
+        }
+      } catch (errClient) {
+        console.log(`[Cliente ${clientName} falhou]: ${errClient.message}`);
+      }
+    }
+
+    if (!stream) {
+      throw new Error('Nenhum cliente conseguiu decodificar o áudio sem login');
+    }
 
     res.setHeader('Content-Type', 'audio/mp4');
 
