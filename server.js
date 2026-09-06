@@ -9,24 +9,26 @@ app.get('/api/stream', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).send('Informe o parâmetro q');
 
-  console.log(`[Stream] Buscando: ${query}`);
+  console.log(`[Stream] Buscando no YouTube: ${query}`);
 
   try {
     const searchResults = await yts(query);
     const video = searchResults.videos && searchResults.videos[0];
 
     if (!video || !video.url) {
-      return res.status(404).send('Nenhum vídeo encontrado');
+      return res.status(404).send('Nenhum vídeo encontrado no YouTube');
     }
 
     console.log(`[Stream] Encontrado: ${video.title} (${video.url})`);
 
     res.setHeader('Content-Type', 'audio/mpeg');
 
+    // Força clientes TV e IOS que não caem na verificação de bot
     const stream = ytdl(video.url, {
       filter: 'audioonly',
       quality: 'highestaudio',
-      highWaterMark: 1 << 25
+      highWaterMark: 1 << 25,
+      playerClients: ['TV', 'IOS', 'ANDROID']
     });
 
     stream.on('error', (err) => {
@@ -43,7 +45,7 @@ app.get('/api/stream', async (req, res) => {
   } catch (err) {
     console.error(`[Erro no Stream] ${err.message}`);
     if (!res.headersSent) {
-      res.status(500).send('Erro ao buscar vídeo: ' + err.message);
+      res.status(500).send('Erro no stream: ' + err.message);
     }
   }
 });
