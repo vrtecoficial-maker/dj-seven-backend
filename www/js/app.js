@@ -1,3 +1,14 @@
+
+let ytPlayer = null;
+let isYtReady = false;
+window.onYouTubeIframeAPIReady = function() {
+  ytPlayer = new YT.Player("yt-audio-player", {
+    height: "1",
+    width: "1",
+    playerVars: { autoplay: 1, controls: 0, playsinline: 1 },
+    events: { "onReady": () => { isYtReady = true; } }
+  });
+};
 let albumData = {
   artist: "",
   title: "PRATO VAZIO",
@@ -127,7 +138,14 @@ function playTrack(index) {
   } else {
     const who = track.performer || albumData.artist;
     const cleanSearch = who + ' ' + name + ' audio original';
-    audioPlayer.src = '/api/stream?q=' + encodeURIComponent(cleanSearch);
+    fetch("https://dj-seven-backend.onrender.com/api/search?q=" + encodeURIComponent(cleanSearch))
+      .then(r => r.json())
+      .then(d => {
+        if (d.videoId && ytPlayer && ytPlayer.loadVideoById) {
+          ytPlayer.loadVideoById(d.videoId);
+          ytPlayer.playVideo();
+        }
+      }).catch(console.error);
   }
 
   audioPlayer.play().then(() => {
