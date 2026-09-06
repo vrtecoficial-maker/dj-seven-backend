@@ -6,22 +6,35 @@ const yts = require('yt-search');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const MIRRORS = [
-  'https://invidious.asir.dev',
-  'https://yt.drgnz.club',
-  'https://invidious.projectsegfau.lt',
-  'https://iv.ggtyler.dev'
-];
-
-function fetchJson(url) {
+function postJson(url, data) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 7000 }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
+    const payload = JSON.stringify(data);
+    const parsed = new URL(url);
+    const options = {
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+      path: parsed.pathname,
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0',
+        'Content-Length': Buffer.byteLength(payload)
+      },
+      timeout: 10000
+    };
+
+    const req = (parsed.protocol === 'https:' ? https : http).request(options, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
       res.on('end', () => {
-        try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
+        try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
       });
-    }).on('error', reject);
+    });
+
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
   });
 }
 
@@ -29,56 +42,56 @@ app.get('/api/stream', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).send('Informe o parâmetro q');
 
-  console.log(`[Stream] Buscando no YouTube: ${query}`);
+  console.log(`[Stream] Buscando: ${query}`);
 
   try {
     const searchResults = await yts(query);
     const video = searchResults.videos && searchResults.videos[0];
 
-    if (!video || !video.videoId) {
+    if (!video || !video.url) {
       return res.status(404).send('Vídeo não encontrado');
     }
 
-    const videoId = video.videoId;
-    console.log(`[Stream] Vídeo: ${video.title} (${videoId})`);
+    console.log(`[Stream] Encontrado: ${video.title} (${video.url})`);
 
-    let streamUrl = null;
+    // Cobalt API pública
+    const cobaltInstances = [
+      'https://api.cobalt.tools/api/json',
+      'https://cobalt-backend.mayanklabs.com/api/json'
+    ];
 
-    for (const mirror of MIRRORS) {
+    let audioDirectUrl = null;
+
+    for (const endpoint of cobaltInstances) {
       try {
-        console.log(`[Stream] Testando mirror: ${mirror}`);
-        const data = await fetchJson(`${mirror}/api/v1/videos/${videoId}`);
-        const audios = data.adaptiveFormats ? data.adaptiveFormats.filter(f => f.type && f.type.startsWith('audio/')) : [];
-        
-        if (audios.length > 0) {
-          const target = audios[0];
-          // Constrói URL direta com proxy local do mirror para evitar 429
-          streamUrl = target.url.startsWith('http') ? target.url : `${mirror}${target.url}`;
-          console.log(`[Stream] URL obtida via ${mirror}`);
+        console.log(`[Cobalt] Tentando: ${endpoint}`);
+        const data = await postJson(endpoint, {
+          url: video.url,
+          isAudioOnly: true,
+          aFormat: 'mp3'
+        });
+
+        if (data && data.url) {
+          audioDirectUrl = data.url;
           break;
         }
       } catch (err) {
-        console.log(`[Mirror falhou]: ${err.message}`);
+        console.log(`[Cobalt falhou em ${endpoint}]: ${err.message}`);
       }
     }
 
-    if (!streamUrl) {
-      return res.status(502).send('Falha ao obter link de áudio pelos mirrors');
+    if (!audioDirectUrl) {
+      return res.status(502).send('Falha ao obter stream via Cobalt');
     }
 
-    res.setHeader('Content-Type', 'audio/mp4');
+    console.log(`[Stream] Redirecionando áudio para stream...`);
     
-    const client = streamUrl.startsWith('https') ? https : http;
-    client.get(streamUrl, (pipeRes) => {
-      pipeRes.pipe(res);
-    }).on('error', (err) => {
-      console.error(`[Erro no Pipe]: ${err.message}`);
-      if (!res.headersSent) res.status(500).send(err.message);
-    });
+    // Redireciona diretamente o áudio para o cliente tocar instantaneamente
+    res.redirect(audioDirectUrl);
 
   } catch (err) {
     console.error(`[Erro Geral]: ${err.message}`);
-    if (!res.headersSent) res.status(500).send(err.message);
+    if (!res.headersSent) res.status(500).send('Erro: ' + err.message);
   }
 });
 
