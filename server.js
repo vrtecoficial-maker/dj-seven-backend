@@ -25,11 +25,11 @@ app.use(express.static('www'));
 app.use('/library', express.static(LIBRARY_DIR));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
+// 3.7-flash responde em 4 segundos e sem fila 503
 const ACTIVE_MODELS = [
-  'gemini-3.1-flash-lite',
-  'gemini-3.5-flash-lite',
+  'gemini-3.7-flash',
   'gemini-3.6-flash',
-  'gemini-3.7-flash'
+  'gemini-3.1-flash-lite'
 ];
 
 const scanCache = new Map();
@@ -77,8 +77,8 @@ Retorne exclusivamente JSON:
         return parsed;
       }
     } catch (e) {
-      console.warn('[Aviso]', modelName, 'instável. Tentando backup...', e.message);
-      await new Promise(r => setTimeout(r, 400));
+      console.warn('[Aviso]', modelName, 'falhou. Tentando backup...', e.message);
+      await new Promise(r => setTimeout(r, 300));
     }
   }
 
@@ -105,7 +105,7 @@ app.post('/api/scan', upload.single('cover'), async (req, res) => {
   }
 });
 
-// Função para salvar álbum na estante
+// Salvar na estante
 function saveAlbumToLibrary(albumData) {
   const slug = (albumData.slug || albumData.title || 'album')
     .toLowerCase()
@@ -129,13 +129,10 @@ function saveAlbumToLibrary(albumData) {
   return slug;
 }
 
-// Rota chamada pelo botão "Baixar Disco para Estante"
 app.post('/api/download-album', (req, res) => {
   try {
-    const albumData = req.body;
-    if (!albumData || !albumData.title) return res.status(400).json({ error: 'Dados inválidos' });
-    const slug = saveAlbumToLibrary(albumData);
-    console.log('[Disco Guardado]:', slug);
+    const slug = saveAlbumToLibrary(req.body);
+    console.log('[Estante Guardado]:', slug);
     res.json({ success: true, slug: slug });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -151,7 +148,6 @@ app.post('/api/library', (req, res) => {
   }
 });
 
-// Rota de listagem da estante
 app.get('/api/library', (req, res) => {
   try {
     const albums = [];
@@ -167,7 +163,6 @@ app.get('/api/library', (req, res) => {
   }
 });
 
-// Rota de exclusão
 app.delete('/api/library/:slug', (req, res) => {
   try {
     const folderPath = path.join(LIBRARY_DIR, req.params.slug);
@@ -186,22 +181,24 @@ app.get('/api/search', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).json({ error: 'Informe a busca' });
 
+  console.log('[YouTube Buscando]:', query);
   try {
     const results = await yts(query);
     const video = results.videos && results.videos[0];
     if (!video) return res.status(404).json({ error: 'Vídeo não encontrado' });
 
+    console.log('[YouTube Encontrado]:', video.title, '(' + video.videoId + ')');
     res.json({
       title: video.title,
       videoId: video.videoId,
       thumbnail: video.thumbnail
     });
   } catch (err) {
+    console.error('[YouTube Erro]:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Fallback SPA
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'www', 'index.html'));
 });
