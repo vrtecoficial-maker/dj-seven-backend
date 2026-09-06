@@ -1,41 +1,22 @@
 const express = require('express');
-const https = require('https');
-const http = require('http');
+const { Innertube, UniversalCache } = require('youtubei.js');
 const yts = require('yt-search');
+const { Readable } = require('stream');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-function postJson(url, data) {
-  return new Promise((resolve, reject) => {
-    const payload = JSON.stringify(data);
-    const parsed = new URL(url);
-    const options = {
-      hostname: parsed.hostname,
-      port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
-      path: parsed.pathname,
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0',
-        'Content-Length': Buffer.byteLength(payload)
-      },
-      timeout: 10000
-    };
+let yt = null;
 
-    const req = (parsed.protocol === 'https:' ? https : http).request(options, (res) => {
-      let body = '';
-      res.on('data', chunk => body += chunk);
-      res.on('end', () => {
-        try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
-      });
+async function getYT() {
+  if (!yt) {
+    yt = await Innertube.create({
+      cache: new UniversalCache(false),
+      generate_session_locally: true,
+      retrieve_player: true
     });
-
-    req.on('error', reject);
-    req.write(payload);
-    req.end();
-  });
+  }
+  return yt;
 }
 
 app.get('/api/stream', async (req, res) => {
@@ -48,50 +29,41 @@ app.get('/api/stream', async (req, res) => {
     const searchResults = await yts(query);
     const video = searchResults.videos && searchResults.videos[0];
 
-    if (!video || !video.url) {
+    if (!video || !video.videoId) {
       return res.status(404).send('Vídeo não encontrado');
     }
 
-    console.log(`[Stream] Encontrado: ${video.title} (${video.url})`);
+    console.log(`[Stream] Encontrado: ${video.title} (${video.videoId})`);
 
-    // Cobalt API pública
-    const cobaltInstances = [
-      'https://api.cobalt.tools/api/json',
-      'https://cobalt-backend.mayanklabs.com/api/json'
-    ];
+    const youtube = await getYT();
 
-    let audioDirectUrl = null;
+    // Obtém o stream com cliente de teste/embed imune ao bloqueio de data center
+    const stream = await youtube.download(video.videoId, {
+      type: 'audio',
+      quality: 'best',
+      client: 'YTMUSIC'
+    }).catch(async () => {
+      console.log('[Stream] Fallback para cliente TV...');
+      return await youtube.download(video.videoId, {
+        type: 'audio',
+        quality: 'best',
+        client: 'TV'
+      });
+    });
 
-    for (const endpoint of cobaltInstances) {
-      try {
-        console.log(`[Cobalt] Tentando: ${endpoint}`);
-        const data = await postJson(endpoint, {
-          url: video.url,
-          isAudioOnly: true,
-          aFormat: 'mp3'
-        });
+    res.setHeader('Content-Type', 'audio/mp4');
+    res.setHeader('Accept-Ranges', 'bytes');
 
-        if (data && data.url) {
-          audioDirectUrl = data.url;
-          break;
-        }
-      } catch (err) {
-        console.log(`[Cobalt falhou em ${endpoint}]: ${err.message}`);
-      }
-    }
+    const nodeStream = Readable.fromWeb(stream);
+    nodeStream.pipe(res);
 
-    if (!audioDirectUrl) {
-      return res.status(502).send('Falha ao obter stream via Cobalt');
-    }
-
-    console.log(`[Stream] Redirecionando áudio para stream...`);
-    
-    // Redireciona diretamente o áudio para o cliente tocar instantaneamente
-    res.redirect(audioDirectUrl);
+    req.on('close', () => {
+      if (nodeStream.destroy) nodeStream.destroy();
+    });
 
   } catch (err) {
-    console.error(`[Erro Geral]: ${err.message}`);
-    if (!res.headersSent) res.status(500).send('Erro: ' + err.message);
+    console.error(`[Erro no Stream]: ${err.message}`);
+    if (!res.headersSent) res.status(500).send('Erro ao processar áudio: ' + err.message);
   }
 });
 
