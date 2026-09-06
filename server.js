@@ -1,9 +1,28 @@
 const express = require('express');
-const ytdl = require('@distube/ytdl-core');
-const yts = require('yt-search');
+const https = require('https');
+const http = require('http');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+const INSTANCES = [
+  'https://inv.nadeko.net',
+  'https://invidious.nerdvpn.de',
+  'https://vid.puffyan.us',
+  'https://invidious.jing.rocks'
+];
+
+function getJson(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 7000 }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
+      });
+    }).on('error', reject);
+  });
+}
 
 app.get('/api/stream', async (req, res) => {
   const query = req.query.q;
@@ -11,43 +30,46 @@ app.get('/api/stream', async (req, res) => {
 
   console.log(`[Stream] Buscando no YouTube: ${query}`);
 
-  try {
-    const searchResults = await yts(query);
-    const video = searchResults.videos && searchResults.videos[0];
+  let audioUrl = null;
 
-    if (!video || !video.url) {
-      return res.status(404).send('Nenhum vídeo encontrado no YouTube');
-    }
+  for (const base of INSTANCES) {
+    try {
+      const searchRes = await getJson(`${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video`);
+      if (!searchRes || !searchRes.length) continue;
 
-    console.log(`[Stream] Encontrado: ${video.title} (${video.url})`);
+      const videoId = searchRes[0].videoId;
+      console.log(`[Stream] Encontrado: ${searchRes[0].title} (${videoId}) em ${base}`);
 
-    res.setHeader('Content-Type', 'audio/mpeg');
+      const videoData = await getJson(`${base}/api/v1/videos/${videoId}`);
+      const audioStreams = videoData.adaptiveFormats ? 
+        videoData.adaptiveFormats.filter(f => f.type && f.type.startsWith('audio/')) : [];
 
-    // Força clientes TV e IOS que não caem na verificação de bot
-    const stream = ytdl(video.url, {
-      filter: 'audioonly',
-      quality: 'highestaudio',
-      highWaterMark: 1 << 25,
-      playerClients: ['TV', 'IOS', 'ANDROID']
-    });
+      if (audioStreams.length > 0) {
+        audioStreams.sort((a, b) => (parseInt(b.bitrate) || 0) - (parseInt(a.bitrate) || 0));
+        audioUrl = audioStreams[0].url;
+      } else if (videoData.formatStreams && videoData.formatStreams.length > 0) {
+        audioUrl = videoData.formatStreams[0].url;
+      }
 
-    stream.on('error', (err) => {
-      console.error(`[Erro ytdl]: ${err.message}`);
-      if (!res.headersSent) res.status(500).send(err.message);
-    });
-
-    stream.pipe(res);
-
-    req.on('close', () => {
-      stream.destroy();
-    });
-
-  } catch (err) {
-    console.error(`[Erro no Stream] ${err.message}`);
-    if (!res.headersSent) {
-      res.status(500).send('Erro no stream: ' + err.message);
+      if (audioUrl) break;
+    } catch (e) {
+      console.log(`[Falha em ${base}]: ${e.message}, tentando próxima...`);
     }
   }
+
+  if (!audioUrl) {
+    return res.status(502).send('Não foi possível obter o stream de áudio.');
+  }
+
+  res.setHeader('Content-Type', 'audio/mpeg');
+  
+  const client = audioUrl.startsWith('https') ? https : http;
+  client.get(audioUrl, (streamRes) => {
+    streamRes.pipe(res);
+  }).on('error', (err) => {
+    console.error(`[Erro pipe]: ${err.message}`);
+    if (!res.headersSent) res.status(500).send(err.message);
+  });
 });
 
 app.listen(PORT, () => {
