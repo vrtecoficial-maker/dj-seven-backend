@@ -1,5 +1,6 @@
 const express = require('express');
 const { Innertube, UniversalCache } = require('youtubei.js');
+const yts = require('yt-search');
 const { Readable } = require('stream');
 
 const app = express();
@@ -11,8 +12,7 @@ async function getYouTube() {
   if (!yt) {
     yt = await Innertube.create({
       cache: new UniversalCache(false),
-      generate_session_locally: true,
-      client_type: 'ANDROID'
+      generate_session_locally: true
     });
   }
   return yt;
@@ -25,20 +25,22 @@ app.get('/api/stream', async (req, res) => {
   console.log(`[Stream] Buscando no YouTube: ${query}`);
 
   try {
-    const youtube = await getYouTube();
-    const search = await youtube.search(query, { type: 'video' });
+    // Busca nativa sem quebra de headers
+    const searchResults = await yts(query);
+    const video = searchResults.videos && searchResults.videos[0];
 
-    if (!search.videos || !search.videos.length) {
+    if (!video || !video.videoId) {
       return res.status(404).send('Nenhum vídeo encontrado');
     }
 
-    const video = search.videos[0];
-    console.log(`[Stream] Reproduzindo: ${video.title.text} (${video.id})`);
+    console.log(`[Stream] Encontrado: ${video.title} (${video.videoId})`);
 
-    const stream = await youtube.download(video.id, {
+    const youtube = await getYouTube();
+    
+    // Baixa o áudio diretamente pelo ID
+    const stream = await youtube.download(video.videoId, {
       type: 'audio',
-      quality: 'best',
-      client: 'ANDROID'
+      quality: 'best'
     });
 
     res.setHeader('Content-Type', 'audio/mp4');
@@ -53,7 +55,7 @@ app.get('/api/stream', async (req, res) => {
   } catch (err) {
     console.error(`[Erro no Stream] ${err.message}`);
     if (!res.headersSent) {
-      res.status(500).send('Erro ao buscar ou extrair áudio: ' + err.message);
+      res.status(500).send('Erro ao processar áudio: ' + err.message);
     }
   }
 });
