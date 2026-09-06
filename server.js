@@ -4,7 +4,6 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { exec } = require('child_process');
 const { GoogleGenAI } = require('@google/genai');
 const yts = require('yt-search');
 
@@ -26,10 +25,11 @@ app.use(express.static('www'));
 app.use('/library', express.static(LIBRARY_DIR));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
+// flash-lite responde em 2 segundos e sem fila 503
 const ACTIVE_MODELS = [
-  'gemini-3.7-flash',
-  'gemini-3.6-flash',
-  'gemini-3.1-flash-lite'
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash-lite',
+  'gemini-3.6-flash'
 ];
 
 const scanCache = new Map();
@@ -38,13 +38,18 @@ async function identifyCover(base64Image, mimeType) {
   const hash = crypto.createHash('md5').update(base64Image.slice(0, 1000)).digest('hex');
   if (scanCache.has(hash)) return scanCache.get(hash);
 
-  const prompt = `Analise este vinil. Identifique Artista e Álbum.
-Retorne exclusivamente JSON:
+  const prompt = `Identifique exatamente este álbum de vinil e liste suas faixas originais.
+Retorne ESTRITAMENTE em formato JSON com a seguinte estrutura:
 {
   "artist": "Nome do Artista",
-  "title": "Artista - Album",
-  "sideA": [{"title": "Faixa 1", "performer": "Artista", "duration": "3:30"}],
-  "sideB": [{"title": "Faixa 1", "performer": "Artista", "duration": "3:30"}]
+  "title": "Artista - Nome do Album",
+  "sideA": [
+    {"title": "Nome da Faixa 1", "performer": "Nome do Artista", "duration": "3:20"},
+    {"title": "Nome da Faixa 2", "performer": "Nome do Artista", "duration": "3:40"}
+  ],
+  "sideB": [
+    {"title": "Nome da Faixa 1 Lado B", "performer": "Nome do Artista", "duration": "3:15"}
+  ]
 }`;
 
   for (const modelName of ACTIVE_MODELS) {
@@ -58,17 +63,28 @@ Retorne exclusivamente JSON:
 
       if (res && res.text) {
         let parsed = JSON.parse(res.text);
-        const fix = (arr) => (Array.isArray(arr) ? arr : []).map((t, i) => {
-          if (typeof t === 'string') return { title: t, performer: parsed.artist, duration: '3:30' };
-          return {
-            title: t.title || t.name || ('Faixa ' + (i + 1)),
-            performer: t.performer || parsed.artist,
-            duration: t.duration || '3:30'
-          };
-        });
 
-        parsed.sideA = fix(parsed.sideA);
-        parsed.sideB = fix(parsed.sideB);
+        // Garante suporte se a IA responder sideA, tracks ou ladoA
+        let rawA = parsed.sideA || parsed.ladoA || parsed.tracks || [];
+        let rawB = parsed.sideB || parsed.ladoB || [];
+
+        // Se veio apenas um array com todas as faixas, divide metade no Lado A e metade no Lado B
+        if (rawB.length === 0 && rawA.length > 2) {
+          const mid = Math.ceil(rawA.length / 2);
+          rawB = rawA.slice(mid);
+          rawA = rawA.slice(0, mid);
+        }
+
+        const formatTrack = (t, i, side) => {
+          let trackName = typeof t === 'string' ? t : (t.title || t.name || `Faixa ${i + 1}`);
+          let performer = typeof t === 'object' && t.performer ? t.performer : parsed.artist;
+          let duration = typeof t === 'object' && t.duration ? t.duration : '3:30';
+          return { title: trackName, performer: performer, duration: duration };
+        };
+
+        parsed.sideA = rawA.map((t, i) => formatTrack(t, i, 'A'));
+        parsed.sideB = rawB.map((t, i) => formatTrack(t, i, 'B'));
+
         if (parsed.sideA.length === 0) parsed.sideA = [{ title: 'Faixa 1', performer: parsed.artist, duration: '3:30' }];
         if (parsed.sideB.length === 0) parsed.sideB = [{ title: 'Faixa 1 (Lado B)', performer: parsed.artist, duration: '3:30' }];
 
@@ -76,8 +92,7 @@ Retorne exclusivamente JSON:
         return parsed;
       }
     } catch (e) {
-      console.warn('[Aviso]', modelName, 'falhou. Tentando backup...', e.message);
-      await new Promise(r => setTimeout(r, 300));
+      console.warn('[Aviso]', modelName, 'falhou:', e.message);
     }
   }
 
@@ -95,7 +110,7 @@ app.post('/api/scan', upload.single('cover'), async (req, res) => {
     const result = await identifyCover(imageBytes.toString('base64'), req.file.mimetype || 'image/jpeg');
 
     if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
-    console.log('[Prensagem Identificada]:', result.title);
+    console.log('[Prensagem Identificada]:', result.title, `(${result.sideA.length} faixas lado A, ${result.sideB.length} faixas lado B)`);
     res.json(result);
   } catch (error) {
     if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
@@ -104,7 +119,7 @@ app.post('/api/scan', upload.single('cover'), async (req, res) => {
   }
 });
 
-// Helper para sanitizar slug
+// Helper de slug
 function makeSlug(name) {
   return (name || 'album')
     .toLowerCase()
@@ -115,121 +130,43 @@ function makeSlug(name) {
     .replace(/^-|-$/g, '');
 }
 
-// Download em segundo plano das músicas via yt-dlp
-async function downloadTracksInBackground(albumData, albumFolder, slug) {
-  console.log(`[Download Offline Iniciado]: ${albumData.title}`);
-  const allTracks = [
-    ...(albumData.sideA || []).map((t, i) => ({ ...t, side: 'A', index: i })),
-    ...(albumData.sideB || []).map((t, i) => ({ ...t, side: 'B', index: i }))
-  ];
+// Salvar na Estante
+function saveToShelf(albumData) {
+  const slug = makeSlug(albumData.slug || albumData.title);
+  const albumFolder = path.join(LIBRARY_DIR, slug);
+  if (!fs.existsSync(albumFolder)) fs.mkdirSync(albumFolder, { recursive: true });
 
-  for (const track of allTracks) {
-    const filename = `track_${track.side}_${track.index + 1}.mp3`;
-    const targetPath = path.join(albumFolder, filename);
-
-    if (fs.existsSync(targetPath)) {
-      track.localUrl = `/library/${slug}/${filename}`;
-      continue;
-    }
-
-    try {
-      const query = `${track.performer || albumData.artist} ${track.title} audio original`;
-      const searchRes = await yts(query);
-      const video = searchRes.videos && searchRes.videos[0];
-
-      if (video && video.url) {
-        console.log(`[Baixando Faixa Lado ${track.side} - ${track.title}]...`);
-        await new Promise((resolve) => {
-          exec(`yt-dlp -x --audio-format mp3 --audio-quality 5 -o "${targetPath}" "${video.url}"`, (err) => {
-            if (!err && fs.existsSync(targetPath)) {
-              track.localUrl = `/library/${slug}/${filename}`;
-              console.log(`[Faixa Salva]: ${filename}`);
-            } else {
-              console.warn(`[Falha download]: ${track.title}`);
-            }
-            resolve();
-          });
-        });
-      }
-    } catch (e) {
-      console.error(`[Erro ao buscar faixa offline]:`, e.message);
-    }
+  const lastCover = path.join(__dirname, 'last_scanned.jpg');
+  if (fs.existsSync(lastCover)) {
+    fs.copyFileSync(lastCover, path.join(albumFolder, 'cover.jpg'));
+    albumData.cover = `/library/${slug}/cover.jpg`;
   }
 
-  // Atualiza o manifest.json com os links locais prontos
+  albumData.slug = slug;
   fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
-  console.log(`[Álbum Completo Pronto para Modo Offline]: ${albumData.title}`);
+  return slug;
 }
 
-// Rota de Baixar Álbum Completo para Estante
 app.post('/api/download-album', (req, res) => {
   try {
-    const albumData = req.body;
-    if (!albumData || !albumData.title) return res.status(400).json({ error: 'Dados inválidos' });
-
-    const slug = makeSlug(albumData.slug || albumData.title);
-    const albumFolder = path.join(LIBRARY_DIR, slug);
-    if (!fs.existsSync(albumFolder)) fs.mkdirSync(albumFolder, { recursive: true });
-
-    // Salva a capa principal
-    const lastCover = path.join(__dirname, 'last_scanned.jpg');
-    if (fs.existsSync(lastCover)) {
-      fs.copyFileSync(lastCover, path.join(albumFolder, 'cover.jpg'));
-      albumData.cover = `/library/${slug}/cover.jpg`;
-    }
-
-    if (!albumData.artworks) albumData.artworks = [];
-    if (albumData.cover && !albumData.artworks.includes(albumData.cover)) {
-      albumData.artworks.push(albumData.cover);
-    }
-
-    albumData.slug = slug;
-    fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
-
-    // Inicia download offline dos MP3s em segundo plano
-    downloadTracksInBackground(albumData, albumFolder, slug);
-
+    const slug = saveToShelf(req.body);
+    console.log('[Estante Guardado]:', slug);
     res.json({ success: true, slug: slug });
   } catch (e) {
-    console.error('[Erro em download-album]:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// Rota para adicionar páginas do encarte / contracapa
-app.post('/api/add-booklet', upload.single('page'), (req, res) => {
+app.post('/api/library', (req, res) => {
   try {
-    const { slug } = req.body;
-    if (!slug || !req.file) return res.status(400).json({ error: 'Dados incompletos' });
-
-    const albumFolder = path.join(LIBRARY_DIR, slug);
-    const manifestPath = path.join(albumFolder, 'manifest.json');
-
-    if (!fs.existsSync(manifestPath)) {
-      return res.status(404).json({ error: 'Álbum não encontrado na Estante' });
-    }
-
-    const album = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-    if (!album.artworks) album.artworks = [];
-
-    const pageFileName = `booklet_${Date.now()}.jpg`;
-    const targetFile = path.join(albumFolder, pageFileName);
-    fs.copyFileSync(req.file.path, targetFile);
-    fs.unlinkSync(req.file.path);
-
-    const relativeUrl = `/library/${slug}/${pageFileName}`;
-    album.artworks.push(relativeUrl);
-
-    fs.writeFileSync(manifestPath, JSON.stringify(album, null, 2));
-    console.log(`[Nova Página de Encarte Adicionada]: ${relativeUrl}`);
-
-    res.json({ success: true, artworks: album.artworks });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    const slug = saveToShelf(req.body);
+    res.json({ success: true, slug: slug });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-// Listagem da Estante
+// Ler Estante
 app.get('/api/library', (req, res) => {
   try {
     const albums = [];
@@ -245,7 +182,7 @@ app.get('/api/library', (req, res) => {
   }
 });
 
-// Exclusão da Estante
+// Deletar da Estante
 app.delete('/api/library/:slug', (req, res) => {
   try {
     const folderPath = path.join(LIBRARY_DIR, req.params.slug);
@@ -259,10 +196,10 @@ app.delete('/api/library/:slug', (req, res) => {
   }
 });
 
-// Busca no YouTube (modo online streaming)
+// Rota de busca no YouTube
 app.get('/api/search', async (req, res) => {
   const query = req.query.q;
-  if (!query) return res.status(400).json({ error: 'Informe a busca' });
+  if (!query) return res.status(400).json({ error: 'Sem busca' });
 
   try {
     const results = await yts(query);
