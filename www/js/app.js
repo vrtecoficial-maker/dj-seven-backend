@@ -1,4 +1,66 @@
 
+// BANCO DE DADOS LOCAL DO DISPOSITIVO (OFFLINE REAL)
+function openOfflineDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('DJSevenDB', 1);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains('albums')) {
+        db.createObjectStore('albums', { keyPath: 'slug' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveAlbumOffline(album) {
+  const db = await openOfflineDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('albums', 'readwrite');
+    const store = tx.objectStore('albums');
+    store.put(album);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getOfflineAlbums() {
+  const db = await openOfflineDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('albums', 'readonly');
+    const store = tx.objectStore('albums');
+    const req = store.getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+
+let tonearmTimer = null;
+function startTonearmSync() {
+  if (tonearmTimer) clearInterval(tonearmTimer);
+  tonearmTimer = setInterval(() => {
+    if (!isPlaying) return;
+    const tracks = currentSide === 'A' ? (albumData.sideA || []) : (albumData.sideB || []);
+    const totalTracks = tracks.length || 1;
+    let trackFraction = 0;
+
+    if (typeof ytPlayer !== 'undefined' && ytPlayer && ytPlayer.getCurrentTime && ytPlayer.getDuration) {
+      const cur = ytPlayer.getCurrentTime() || 0;
+      const dur = ytPlayer.getDuration() || 1;
+      trackFraction = Math.min(1, Math.max(0, cur / dur));
+    } else if (audioPlayer && audioPlayer.duration) {
+      trackFraction = Math.min(1, Math.max(0, audioPlayer.currentTime / audioPlayer.duration));
+    }
+
+    const currentGlobalProgress = (currentTrackIndex + trackFraction) / totalTracks;
+    const targetAngle = ANGLE_OUTER + (currentGlobalProgress * (ANGLE_INNER - ANGLE_OUTER));
+    setTonearmAngle(Math.min(ANGLE_INNER, Math.max(ANGLE_OUTER, targetAngle)), false);
+  }, 500);
+}
+
+
 let ytPlayer = null;
 let isYtReady = false;
 window.onYouTubeIframeAPIReady = function() {
@@ -13,6 +75,7 @@ window.onYouTubeIframeAPIReady = function() {
           isPlaying = true;
           playBtn.textContent = '⏸';
           mainDisc.classList.add('rotating');
+          if (typeof startTonearmSync === 'function') startTonearmSync();
           const currentTrack = (currentSide === 'A' ? albumData.sideA : albumData.sideB)[currentTrackIndex];
           const name = currentTrack ? (currentTrack.title || currentTrack.name) : '';
           trackStatusEl.innerHTML = '<span class="needle-icon">•</span> TOCANDO: ' + name;
@@ -155,8 +218,9 @@ function playTrack(index) {
     audioPlayer.play().then(() => {
       trackStatusEl.innerHTML = '<span class="needle-icon">•</span> TOCANDO (OFFLINE): ' + name;
       isPlaying = true;
-      playBtn.textContent = '⏸';
-      mainDisc.classList.add('rotating');
+          playBtn.textContent = '⏸';
+          mainDisc.classList.add('rotating');
+          if (typeof startTonearmSync === 'function') startTonearmSync();
     }).catch(() => {
       trackStatusEl.innerHTML = '<span class="needle-icon">•</span> TOQUE NO PLAY';
       isPlaying = false;
@@ -185,6 +249,7 @@ function playTrack(index) {
 }
 
 function pauseTrack() {
+  if (typeof tonearmTimer !== 'undefined' && tonearmTimer) clearInterval(tonearmTimer);
   if (typeof ytPlayer !== "undefined" && ytPlayer && ytPlayer.pauseVideo) { ytPlayer.pauseVideo(); }
   audioPlayer.pause();
   setTonearmAngle(ANGLE_REST, true);
@@ -316,27 +381,47 @@ cameraFile.addEventListener('change', (e) => handleImageFile(e.target.files[0]))
 galleryFile.addEventListener('change', (e) => handleImageFile(e.target.files[0]));
 
 btnDownloadAlbum.addEventListener('click', async () => {
-  trackStatusEl.innerHTML = '<span class="needle-icon">●</span> BAIXANDO PARA A ESTANTE...';
+  if (!albumData || !albumData.title) {
+    alert('Nenhum disco carregado no prato!');
+    return;
+  }
+  trackStatusEl.innerHTML = '<span class="needle-icon">•</span> BAIXANDO PARA A ESTANTE...';
   try {
-    const res = await fetch('/api/download-album', {
+    const slug = (albumData.slug || albumData.title).toLowerCase().replace(/[^a-z0-9]/g, '-');
+    albumData.slug = slug;
+    
+    // Salva no banco de dados interno do celular (offline)
+    await saveAlbumOffline(albumData);
+    
+    // Notifica também o servidor remoto se estiver online
+    fetch('/api/download-album', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(albumData)
-    });
-    const result = await res.json();
-    albumData.slug = result.slug;
-    alert('Álbum e encartes sendo guardados na sua Estante!');
+    }).catch(() => {});
+
+    trackStatusEl.innerHTML = '<span class="needle-icon">•</span> DISCO SALVO NA ESTANTE!';
+    alert('Álbum guardado com sucesso! Disponível na Estante mesmo sem internet.');
   } catch (e) {
-    trackStatusEl.innerHTML = '<span class="needle-icon">●</span> FALHA AO SALVAR ÁLBUM';
+    console.error(e);
+    trackStatusEl.innerHTML = '<span class="needle-icon">•</span> FALHA AO SALVAR ÁLBUM';
   }
 });
 
 async function loadShelf() {
   try {
-    const res = await fetch('/api/library');
-    const albums = await res.json();
+    let albums = [];
+    try {
+      albums = await getOfflineAlbums();
+    } catch(e) {}
+    
+    if (!albums || albums.length === 0) {
+      try {
+        const res = await fetch('/api/library');
+        albums = await res.json();
+      } catch(e) {}
+    }
     shelfGrid.innerHTML = '';
-
     if (!albums || albums.length === 0) {
       shelfGrid.innerHTML = '<p class="empty-msg">Sua coleção está vazia.<br>Toque em 💾 Salvar no toca-discos!</p>';
       return;

@@ -223,3 +223,24 @@ app.use((req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
+
+// Rota para extração direta de áudio para download offline
+app.get('/api/audio-stream', async (req, res) => {
+  const query = req.query.q;
+  if (!query) return res.status(400).send('Query ausente');
+  try {
+    const searchRes = await yts(query);
+    const video = searchRes.videos && searchRes.videos[0];
+    if (!video) return res.status(404).send('Vídeo não encontrado');
+
+    const streamUrl = `https://www.youtube.com/watch?v=${video.videoId}`;
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Content-Disposition', `attachment; filename="track.mp3"`);
+
+    const proc = exec(`yt-dlp -o - -f bestaudio "${streamUrl}"`);
+    proc.stdout.pipe(res);
+    proc.stderr.on('data', (d) => console.log('[yt-dlp]:', d.toString()));
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
