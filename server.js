@@ -121,11 +121,11 @@ function makeSlug(name) {
     .replace(/^-|-$/g, '');
 }
 
-// Download com suporte a redirecionamentos HTTP/HTTPS
+// Download com redirecionamento
 function downloadFile(url, destPath) {
   return new Promise((resolve, reject) => {
     const proto = url.startsWith('https') ? https : http;
-    proto.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
+    proto.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         return downloadFile(res.headers.location, destPath).then(resolve).catch(reject);
       }
@@ -143,41 +143,34 @@ function downloadFile(url, destPath) {
   });
 }
 
-// Instâncias públicas da Invidious API para contornar bloqueio de bot
-const INVIDIOUS_INSTANCES = [
-  'https://inv.nadeko.net',
-  'https://invidious.nerdvpn.de',
-  'https://invidious.jing.rocks',
-  'https://invidious.slipfox.xyz'
+// Servidores Piped API
+const PIPED_SERVERS = [
+  'https://api.piped.privacy.com.de',
+  'https://pipedapi.tokhmi.xyz',
+  'https://pipedapi.kavin.rocks',
+  'https://api-piped.mha.fi'
 ];
 
-async function fetchAudioFromInvidious(videoId, destPath) {
-  for (const base of INVIDIOUS_INSTANCES) {
+async function getAudioStreamUrl(videoId) {
+  for (const server of PIPED_SERVERS) {
     try {
-      const apiUrl = `${base}/api/v1/videos/${videoId}`;
-      const data = await new Promise((resolve, reject) => {
-        https.get(apiUrl, { timeout: 7000 }, (res) => {
-          let body = '';
-          res.on('data', chunk => body += chunk);
+      const endpoint = `${server}/streams/${videoId}`;
+      const json = await new Promise((resolve, reject) => {
+        https.get(endpoint, { timeout: 6000, headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
+          if (res.statusCode !== 200) return reject(new Error('Status ' + res.statusCode));
+          let data = '';
+          res.on('data', c => data += c);
           res.on('end', () => {
-            try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+            try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
           });
         }).on('error', reject);
       });
 
-      const audioFormats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio/'));
-      if (audioFormats.length > 0) {
-        // Escolhe o formato de áudio com taxa moderada
-        const target = audioFormats[0];
-        const audioUrl = target.url;
-        await downloadFile(audioUrl, destPath);
-        return true;
-      }
-    } catch (err) {
-      // Tenta próxima instância se falhar
-    }
+      const audio = (json.audioStreams || []).find(s => s.url);
+      if (audio && audio.url) return audio.url;
+    } catch (e) {}
   }
-  throw new Error('Não foi possível obter áudio via API de streaming.');
+  throw new Error('Serviço de stream indisponível no momento');
 }
 
 async function downloadTrackAudio(query, destPath) {
@@ -185,10 +178,27 @@ async function downloadTrackAudio(query, destPath) {
   const video = searchRes.videos && searchRes.videos[0];
   if (!video) throw new Error('Vídeo não encontrado para ' + query);
 
-  return await fetchAudioFromInvidious(video.videoId, destPath);
+  const audioUrl = await getAudioStreamUrl(video.videoId);
+  return await downloadFile(audioUrl, destPath);
 }
 
-// Processamento de download do disco em segundo plano
+// Rota de stream direto para o celular baixar individualmente
+app.get('/api/get-audio', async (req, res) => {
+  const query = req.query.q;
+  if (!query) return res.status(400).send('Sem busca');
+  try {
+    const searchRes = await yts(query);
+    const video = searchRes.videos && searchRes.videos[0];
+    if (!video) return res.status(404).send('Vídeo não encontrado');
+
+    const streamUrl = await getAudioStreamUrl(video.videoId);
+    res.redirect(streamUrl);
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
+// Download do disco
 async function processAlbumDownload(albumData, albumFolder, slug) {
   const allTracks = [
     ...(albumData.sideA || []).map((t, idx) => ({ track: t, side: 'A', num: idx + 1 })),
@@ -221,7 +231,6 @@ async function processAlbumDownload(albumData, albumFolder, slug) {
   console.log(`[Sucesso: Disco 100% Offline]: ${albumData.title}`);
 }
 
-// Rota de Baixar Disco para Estante
 app.post('/api/download-album', (req, res) => {
   try {
     const albumData = req.body;
@@ -246,15 +255,12 @@ app.post('/api/download-album', (req, res) => {
     fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
 
     processAlbumDownload(albumData, albumFolder, slug);
-
     res.json({ success: true, slug: slug });
   } catch (e) {
-    console.error('[Erro em download-album]:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// Encarte
 app.post('/api/add-booklet', upload.single('page'), (req, res) => {
   try {
     const { slug } = req.body;
@@ -262,7 +268,6 @@ app.post('/api/add-booklet', upload.single('page'), (req, res) => {
 
     const albumFolder = path.join(LIBRARY_DIR, slug);
     const manifestPath = path.join(albumFolder, 'manifest.json');
-
     if (!fs.existsSync(manifestPath)) return res.status(404).json({ error: 'Disco não encontrado' });
 
     const album = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
@@ -281,7 +286,6 @@ app.post('/api/add-booklet', upload.single('page'), (req, res) => {
   }
 });
 
-// Estante
 app.get('/api/library', (req, res) => {
   try {
     const albums = [];
@@ -310,7 +314,6 @@ app.delete('/api/library/:slug', (req, res) => {
   }
 });
 
-// Busca no YouTube para modo online
 app.get('/api/search', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).json({ error: 'Sem busca' });

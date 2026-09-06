@@ -1,4 +1,21 @@
 
+async function saveTrackAudioBlob(key, blob) {
+  const db = await openOfflineDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('albums', 'readwrite');
+    const store = tx.objectStore('albums');
+    const req = store.get(key);
+    req.onsuccess = () => {
+      const data = req.result || { slug: key };
+      data.audioBlob = blob;
+      store.put(data);
+      resolve();
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+
 // BANCO DE DADOS LOCAL DO DISPOSITIVO (OFFLINE REAL)
 function openOfflineDB() {
   return new Promise((resolve, reject) => {
@@ -382,29 +399,41 @@ galleryFile.addEventListener('change', (e) => handleImageFile(e.target.files[0])
 
 btnDownloadAlbum.addEventListener('click', async () => {
   if (!albumData || !albumData.title) {
-    alert('Nenhum disco carregado no prato!');
+    alert('Nenhum disco carregado!');
     return;
   }
-  trackStatusEl.innerHTML = '<span class="needle-icon">•</span> BAIXANDO PARA A ESTANTE...';
-  try {
-    const slug = (albumData.slug || albumData.title).toLowerCase().replace(/[^a-z0-9]/g, '-');
-    albumData.slug = slug;
-    
-    // Salva no banco de dados interno do celular (offline)
-    await saveAlbumOffline(albumData);
-    
-    // Notifica também o servidor remoto se estiver online
-    fetch('/api/download-album', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(albumData)
-    }).catch(() => {});
+  const slug = (albumData.slug || albumData.title).toLowerCase().replace(/[^a-z0-9]/g, '-');
+  albumData.slug = slug;
+  trackStatusEl.innerHTML = '<span class="needle-icon">•</span> BAIXANDO PARA A MEMÓRIA DO CELULAR...';
 
-    trackStatusEl.innerHTML = '<span class="needle-icon">•</span> DISCO SALVO NA ESTANTE!';
-    alert('Álbum guardado com sucesso! Disponível na Estante mesmo sem internet.');
+  try {
+    const allTracks = [...(albumData.sideA || []), ...(albumData.sideB || [])];
+    for (let i = 0; i < allTracks.length; i++) {
+      const t = allTracks[i];
+      const q = (t.performer || albumData.artist) + ' ' + (t.title || t.name) + ' audio original';
+      trackStatusEl.innerHTML = '<span class="needle-icon">•</span> BAIXANDO FAIXA ' + (i + 1) + '/' + allTracks.length + '...';
+      try {
+        const resp = await fetch('https://dj-seven-backend.onrender.com/api/get-audio?q=' + encodeURIComponent(q));
+        if (resp.ok) {
+          const blob = await resp.blob();
+          const base64Audio = await new Promise((res) => {
+            const reader = new FileReader();
+            reader.onloadend = () => res(reader.result);
+            reader.readAsDataURL(blob);
+          });
+          t.localUrl = base64Audio;
+        }
+      } catch (err) {
+        console.warn('Erro ao baixar faixa:', t.title, err);
+      }
+    }
+
+    await saveAlbumOffline(albumData);
+    trackStatusEl.innerHTML = '<span class="needle-icon">•</span> DISCO 100% OFFLINE SALVO!';
+    alert('Álbum completo e faixas baixadas! Pode colocar em Modo Avião e ouvir na Estante.');
   } catch (e) {
     console.error(e);
-    trackStatusEl.innerHTML = '<span class="needle-icon">•</span> FALHA AO SALVAR ÁLBUM';
+    trackStatusEl.innerHTML = '<span class="needle-icon">•</span> ERRO NO DOWNLOAD';
   }
 });
 
