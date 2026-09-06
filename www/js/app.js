@@ -470,10 +470,16 @@ async function loadShelf() {
         </div>
       `;
 
-      const playAction = () => {
-        albumData = item;
-        updateCoverArt(item.cover);
-        albumTitleEl.textContent = item.title;
+      const playAction = async () => {
+        try {
+          const offlineList = await getOfflineAlbums();
+          const found = offlineList.find(x => x.slug === item.slug);
+          albumData = found || item;
+        } catch(e) {
+          albumData = item;
+        }
+        updateCoverArt(albumData.cover || albumData.coverUrl || '');
+        albumTitleEl.textContent = albumData.title;
         currentSide = 'A';
         currentTrackIndex = 0;
         flipBtn.querySelector('.switch-lbl').textContent = 'Lado B';
