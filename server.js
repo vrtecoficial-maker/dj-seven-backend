@@ -216,6 +216,7 @@ app.get('/api/stream', (req, res) => {
   if (!query) return res.status(400).send('Query ausente');
   res.setHeader('Content-Type', 'audio/mpeg');
   console.log("[Stream] Iniciando busca:", query);
+  console.log("[Stream] Iniciando busca:", query);
   const ytdlp = spawn('./bin/yt-dlp', ['ytsearch1:' + query, '-f', 'ba/b', '-o', '-', '--no-playlist', '--quiet']);
   const ffmpegProc = spawn('./bin/ffmpeg', ['-i', 'pipe:0', '-vn', '-acodec', 'libmp3lame', '-ac', '2', '-b:a', '128k', '-f', 'mp3', 'pipe:1']);
   ytdlp.on('error', e => console.error('[yt-dlp erro]', e)); ytdlp.stderr.on('data', d => console.error('[yt-dlp log]', d.toString())); ytdlp.stdout.on('error', () => {});
