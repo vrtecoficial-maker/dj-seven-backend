@@ -6,7 +6,24 @@ window.onYouTubeIframeAPIReady = function() {
     height: "1",
     width: "1",
     playerVars: { autoplay: 1, controls: 0, playsinline: 1 },
-    events: { "onReady": () => { isYtReady = true; } }
+    events: {
+      "onReady": () => { isYtReady = true; },
+      "onStateChange": (event) => {
+        if (event.data === YT.PlayerState.PLAYING) {
+          isPlaying = true;
+          playBtn.textContent = '⏸';
+          mainDisc.classList.add('rotating');
+          const currentTrack = (currentSide === 'A' ? albumData.sideA : albumData.sideB)[currentTrackIndex];
+          const name = currentTrack ? (currentTrack.title || currentTrack.name) : '';
+          trackStatusEl.innerHTML = '<span class="needle-icon">•</span> TOCANDO: ' + name;
+        } else if (event.data === YT.PlayerState.PAUSED || event.data === YT.PlayerState.ENDED) {
+          isPlaying = false;
+          playBtn.textContent = '▶';
+          mainDisc.classList.remove('rotating');
+          if (event.data === YT.PlayerState.ENDED) nextTrack();
+        }
+      }
+    }
   });
 };
 let albumData = {
@@ -135,6 +152,16 @@ function playTrack(index) {
 
   if (track.localUrl) {
     audioPlayer.src = track.localUrl;
+    audioPlayer.play().then(() => {
+      trackStatusEl.innerHTML = '<span class="needle-icon">•</span> TOCANDO (OFFLINE): ' + name;
+      isPlaying = true;
+      playBtn.textContent = '⏸';
+      mainDisc.classList.add('rotating');
+    }).catch(() => {
+      trackStatusEl.innerHTML = '<span class="needle-icon">•</span> TOQUE NO PLAY';
+      isPlaying = false;
+      playBtn.textContent = '▶';
+    });
   } else {
     const who = track.performer || albumData.artist;
     const cleanSearch = who + ' ' + name + ' audio original';
@@ -144,19 +171,17 @@ function playTrack(index) {
         if (d.videoId && ytPlayer && ytPlayer.loadVideoById) {
           ytPlayer.loadVideoById(d.videoId);
           ytPlayer.playVideo();
+          isPlaying = true;
+          playBtn.textContent = '⏸';
+        } else {
+          trackStatusEl.innerHTML = '<span class="needle-icon">•</span> ERRO AO SINTONIZAR';
         }
-      }).catch(console.error);
+      })
+      .catch(err => {
+        console.error(err);
+        trackStatusEl.innerHTML = '<span class="needle-icon">•</span> ERRO DE CONEXÃO';
+      });
   }
-
-  audioPlayer.play().then(() => {
-    trackStatusEl.innerHTML = '<span class="needle-icon">●</span> TOCANDO: ' + name;
-    isPlaying = true;
-    playBtn.textContent = '⏸';
-  }).catch(() => {
-    trackStatusEl.innerHTML = '<span class="needle-icon">●</span> PRONTO • TOQUE NO PLAY';
-    isPlaying = false;
-    playBtn.textContent = '▶';
-  });
 }
 
 function pauseTrack() {
