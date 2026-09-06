@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Pioneer PL-530 Hi-Fi</title>
+  
+  <meta name="theme-color" content="#181615">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" type="image/png" sizes="192x192" href="/img/icon-192.png">
+  <link rel="apple-touch-icon" href="/img/icon-192.png">
+
+  <link rel="stylesheet" href="css/style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Monoton&family=Righteous&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <input type="file" id="cameraFile" accept="image/*" capture="environment" style="display:none">
+  <input type="file" id="galleryFile" accept="image/*" style="display:none">
+  <input type="file" id="bookletFileInput" accept="image/*" style="display:none">
+  <audio id="audioNative" preload="none"></audio>
+
+  <!-- Painel de Controle Superior -->
+  
+  <!-- Banner Retrô Vintage Animado -->
+  <aside class="vintage-marquee" aria-label="Apresentação DJ SEVEN">
+    <div class="marquee-border">
+      <div class="marquee-content">
+        <span class="vintage-stars">★ ★ ★</span>
+        <h2 class="neon-title">DJ SEVEN</h2>
+        <p class="neon-sub">BEM-VINDO</p>
+        <span class="vintage-stars">★ ★ ★</span>
+      </div>
+    </div>
+  </aside>
+
+  <header class="audio-panel">
+    <div class="panel-badge">
+      <span class="power-led active"></span>
+      <span class="brand-text">PIONEER PL-530 • DIRECT DRIVE FULL AUTOMATIC</span>
+    </div>
+
+    <div class="display-meter">
+      <h1 id="albumTitle">PRATO VAZIO</h1>
+      <p id="trackStatus"><span class="needle-icon">●</span> AGUARDANDO DISCO NA VITROLA</p>
+    </div>
+
+    <div class="hifi-switches">
+      <button class="hifi-switch" id="btnOpenCam">
+        <span class="switch-icon">📷</span>
+        <span class="switch-lbl">Escanear Capa de Disco</span>
+      </button>
+      <button class="hifi-switch" id="btnOpenGallery">
+        <span class="switch-icon">📂</span>
+        <span class="switch-lbl">Procurar Capa Baixada</span>
+      </button>
+      <button class="hifi-switch" id="btnOpenShelf">
+        <span class="switch-icon">💽</span>
+        <span class="switch-lbl">Estante de Discos</span>
+      </button>
+      <button class="hifi-switch" id="btnOpenBooklet">
+        <span class="switch-icon">📖</span>
+        <span class="switch-lbl">Encarte Oficial</span>
+      </button>
+      <button class="hifi-switch" id="btnDownloadAlbum">
+        <span class="switch-icon">⬇️</span>
+        <span class="switch-lbl">Baixar Disco para Estante</span>
+      </button>
+      <button class="hifi-switch" id="flipBtn">
+        <span class="switch-icon">🔄</span>
+        <span class="switch-lbl">Virar Lado (Lado B)</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Gabinete Pioneer PL-530 -->
+  <main class="turntable-container">
+    <div class="pioneer-plinth">
+      
+      <!-- Prato Giratório -->
+      <div class="platter-assembly">
+        <div class="aluminum-rim"></div>
+        <div class="rubber-mat">
+          <div class="vinyl-flip-wrapper" id="vinylFlipper">
+            <div class="vinyl-disc" id="mainDisc">
+              <div class="vinyl-specular"></div>
+              <div class="grooves-overlay" id="groovesOverlay"></div>
+              <div class="vinyl-label-disc" id="vinylLabel">
+                <div class="brass-spindle"></div>
+                <span class="side-tag" id="sideTagText">LADO A</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Base Metálica do Braço (Gimbal) -->
+      <div class="pioneer-gimbal-base">
+        <div class="antiskate-dial"></div>
+        <div class="rest-clip"></div>
+      </div>
+
+      <!-- Braço ÚNICO, Realista e Calibrado Sobre o Disco -->
+      <div class="pioneer-tonearm" id="tonearm">
+        <div class="tonearm-counterweight"></div>
+        <div class="tonearm-bearing"></div>
+        <div class="tonearm-rod-metal"></div>
+        <div class="tonearm-cartridge-head">
+          <div class="cartridge-body"></div>
+          <div class="stylus-needle"></div>
+        </div>
+      </div>
+
+      <!-- Placa de Alumínio Inferior -->
+      <div class="pioneer-control-panel">
+        <div class="panel-left-controls">
+          <div class="knob-group">
+            <div class="metal-knob"></div>
+            <div class="metal-knob"></div>
+          </div>
+          <span class="strobe-badge">33 ⅓ RPM</span>
+        </div>
+
+        <div class="transport-deck">
+          <button class="deck-btn-hifi" id="prevBtn">⏮</button>
+          <button class="deck-btn-hifi play" id="playBtn">▶</button>
+          <button class="deck-btn-hifi" id="nextBtn">⏭</button>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- Ficha Técnica -->
+  <section class="audiophile-tracklist">
+    <div class="tracklist-header">
+      <h2 id="sideLabel">FAIXAS • LADO A</h2>
+      <span class="analog-spec">STEREO • HI-FI</span>
+    </div>
+    <ul class="tracklist" id="trackList"></ul>
+  </section>
+
+  <!-- Modais -->
+  <div class="modal-backdrop" id="shelfModal">
+    <div class="modal-dialog">
+      <div class="modal-bar">
+        <h3>💽 Estante de Discos Gravados</h3>
+        <button class="close-x" id="closeShelfBtn">&times;</button>
+      </div>
+      <div class="shelf-scroll" id="shelfGrid"></div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="bookletModal">
+    <div class="modal-dialog">
+      <div class="modal-bar">
+        <h3 id="bookletTitle">📖 Encarte & Arte Oficial</h3>
+        <button class="close-x" id="closeBookletBtn">&times;</button>
+      </div>
+      <div class="booklet-body">
+        <div class="booklet-frame">
+          <img id="bookletImg" src="" alt="Encarte">
+        </div>
+        <div class="booklet-actions">
+          <div class="nav-pages">
+            <button class="action-btn" id="prevPageBtn">◀</button>
+            <span id="pageCounter" class="page-indicator">1 / 1</span>
+            <button class="action-btn" id="nextPageBtn">▶</button>
+          </div>
+          <button class="action-btn add-btn" id="btnAddPage">➕ Adicionar Foto</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
