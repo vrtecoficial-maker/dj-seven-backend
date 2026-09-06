@@ -190,7 +190,7 @@ app.post('/api/download-album', async (req, res) => {
       const q = (track.performer || album.artist || '') + ' ' + (track.title || '') + ' audio original';
       console.log('[Baixando]:', track.title);
       await new Promise(resolve => {
-        const p = spawn('yt-dlp', ['ytsearch1:' + q, '-x', '--audio-format', 'mp3', '--audio-quality', '128K', '-o', dest, '--no-playlist', '--quiet']);
+        const p = spawn('./bin/yt-dlp', ['ytsearch1:' + q, '-x', '--audio-format', 'mp3', '--audio-quality', '128K', '-o', dest, '--no-playlist', '--quiet']);
         p.on('close', resolve); p.on('error', resolve);
       });
     }
@@ -215,8 +215,8 @@ app.get('/api/stream', (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).send('Query ausente');
   res.setHeader('Content-Type', 'audio/mpeg');
-  const ytdlp = spawn('yt-dlp', ['ytsearch1:' + query, '-f', 'ba/b', '-o', '-', '--no-playlist', '--quiet']);
-  const ffmpegProc = spawn('ffmpeg', ['-i', 'pipe:0', '-vn', '-acodec', 'libmp3lame', '-ac', '2', '-b:a', '128k', '-f', 'mp3', 'pipe:1']);
+  const ytdlp = spawn('./bin/yt-dlp', ['ytsearch1:' + query, '-f', 'ba/b', '-o', '-', '--no-playlist', '--quiet']);
+  const ffmpegProc = spawn('./bin/ffmpeg', ['-i', 'pipe:0', '-vn', '-acodec', 'libmp3lame', '-ac', '2', '-b:a', '128k', '-f', 'mp3', 'pipe:1']);
   ytdlp.stdin.on('error', () => {}); ytdlp.stdout.on('error', () => {});
   ffmpegProc.stdin.on('error', () => {}); ffmpegProc.stdout.on('error', () => {});
   ytdlp.stdout.pipe(ffmpegProc.stdin);
