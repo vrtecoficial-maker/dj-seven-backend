@@ -1,49 +1,144 @@
 const express = require('express');
+const multer = require('multer');
 const cors = require('cors');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { GoogleGenAI } = require('@google/genai');
 const yts = require('yt-search');
 
 const app = express();
+const upload = multer({ dest: 'uploads/' });
+const ai = new GoogleGenAI();
 const PORT = process.env.PORT || 3000;
+
+const LIBRARY_DIR = path.join(__dirname, 'library');
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+
+if (!fs.existsSync(LIBRARY_DIR)) fs.mkdirSync(LIBRARY_DIR, { recursive: true });
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 app.use(cors());
 app.use(express.json());
+app.use(express.static('www'));
+app.use('/library', express.static(LIBRARY_DIR));
+app.use('/uploads', express.static(UPLOADS_DIR));
 
-// Garante pastas necessárias
-const libraryDir = path.join(__dirname, 'library');
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(libraryDir)) fs.mkdirSync(libraryDir, { recursive: true });
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+// Modelos do Gemini para reconhecimento
+const ACTIVE_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-1.5-flash',
+  'gemini-2.0-flash'
+];
 
-// Pastas estáticas
-app.use(express.static(path.join(__dirname, 'www')));
-app.use('/library', express.static(libraryDir));
-app.use('/uploads', express.static(uploadsDir));
+const scanCache = new Map();
 
-// Rota da Estante: listar discos
-app.get('/api/library', (req, res) => {
-  try {
-    const files = fs.readdirSync(libraryDir).filter(f => f.endsWith('.json'));
-    const items = files.map(file => {
-      try {
-        const raw = fs.readFileSync(path.join(libraryDir, file), 'utf8');
-        return JSON.parse(raw);
-      } catch {
-        return null;
+async function identifyCover(base64Image, mimeType) {
+  const hash = crypto.createHash('md5').update(base64Image.slice(0, 1000)).digest('hex');
+  if (scanCache.has(hash)) return scanCache.get(hash);
+
+  const prompt = `Analise este vinil. Identifique Artista e Álbum.
+Retorne exclusivamente JSON:
+{
+  "artist": "Nome do Artista",
+  "title": "Artista - Album",
+  "sideA": [{"title": "Faixa 1", "performer": "Artista", "duration": "3:30"}],
+  "sideB": [{"title": "Faixa 1", "performer": "Artista", "duration": "3:30"}]
+}`;
+
+  for (const modelName of ACTIVE_MODELS) {
+    try {
+      console.log('[IA Consultando]:', modelName);
+      const res = await ai.models.generateContent({
+        model: modelName,
+        contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { data: base64Image, mimeType: mimeType } }] }],
+        config: { responseMimeType: 'application/json' }
+      });
+
+      if (res && res.text) {
+        let parsed = JSON.parse(res.text);
+        const fix = (arr) => (Array.isArray(arr) ? arr : []).map((t, i) => {
+          if (typeof t === 'string') return { title: t, performer: parsed.artist, duration: '3:30' };
+          return {
+            title: t.title || t.name || ('Faixa ' + (i + 1)),
+            performer: t.performer || parsed.artist,
+            duration: t.duration || '3:30'
+          };
+        });
+
+        parsed.sideA = fix(parsed.sideA);
+        parsed.sideB = fix(parsed.sideB);
+
+        if (parsed.sideA.length === 0) parsed.sideA = [{ title: 'Faixa 1', performer: parsed.artist, duration: '3:30' }];
+        if (parsed.sideB.length === 0) parsed.sideB = [{ title: 'Faixa 1 (Lado B)', performer: parsed.artist, duration: '3:30' }];
+
+        scanCache.set(hash, parsed);
+        return parsed;
       }
-    }).filter(Boolean);
-    res.json(items);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    } catch (e) {
+      console.warn('[Aviso]', modelName, 'falhou. Tentando próximo...', e.message);
+      await new Promise(r => setTimeout(r, 600));
+    }
+  }
+
+  throw new Error('Falha no reconhecimento da capa');
+}
+
+// Rota de Scan (IA do Gemini)
+app.post('/api/scan', upload.single('cover'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Sem imagem' });
+  const imagePath = req.file.path;
+
+  try {
+    fs.copyFileSync(imagePath, path.join(__dirname, 'last_scanned.jpg'));
+    const imageBytes = fs.readFileSync(imagePath);
+    const result = await identifyCover(imageBytes.toString('base64'), req.file.mimetype || 'image/jpeg');
+
+    if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
+    console.log('[Prensagem Identificada]:', result.title);
+    res.json(result);
+  } catch (error) {
+    if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
+    console.error('[Erro no Scan]:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Rota da Estante: apagar disco
+// Rota da Estante (leitura dos manifests e arquivos JSON)
+app.get('/api/library', (req, res) => {
+  try {
+    const albums = [];
+    
+    // Leitura por pastas manifest.json
+    fs.readdirSync(LIBRARY_DIR).forEach(folder => {
+      const p = path.join(LIBRARY_DIR, folder, 'manifest.json');
+      if (fs.existsSync(p)) {
+        try { albums.push(JSON.parse(fs.readFileSync(p, 'utf-8'))); } catch (e) {}
+      }
+    });
+
+    // Compatibilidade com arquivos .json diretos
+    fs.readdirSync(LIBRARY_DIR).filter(f => f.endsWith('.json') && f !== 'manifest.json').forEach(file => {
+      try { albums.push(JSON.parse(fs.readFileSync(path.join(LIBRARY_DIR, file), 'utf-8'))); } catch (e) {}
+    });
+
+    res.json(albums);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro na estante' });
+  }
+});
+
+// Rota de exclusão da estante
 app.delete('/api/library/:slug', (req, res) => {
   try {
     const slug = req.params.slug;
-    const filePath = path.join(libraryDir, `${slug}.json`);
+    const folderPath = path.join(LIBRARY_DIR, slug);
+    const filePath = path.join(LIBRARY_DIR, `${slug}.json`);
+
+    if (fs.existsSync(folderPath)) {
+      fs.rmSync(folderPath, { recursive: true, force: true });
+      return res.json({ success: true });
+    }
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
       return res.json({ success: true });
