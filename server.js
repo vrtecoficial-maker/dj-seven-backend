@@ -4,9 +4,10 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const http = require('http');
+const https = require('https');
 const { GoogleGenAI } = require('@google/genai');
 const yts = require('yt-search');
-const ytdl = require('@distube/ytdl-core');
 
 const app = express();
 const upload = multer({ dest: 'uploads/' });
@@ -120,23 +121,74 @@ function makeSlug(name) {
     .replace(/^-|-$/g, '');
 }
 
-// Helper para baixar uma faixa via ytdl-core
+// Download com suporte a redirecionamentos HTTP/HTTPS
+function downloadFile(url, destPath) {
+  return new Promise((resolve, reject) => {
+    const proto = url.startsWith('https') ? https : http;
+    proto.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return downloadFile(res.headers.location, destPath).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        return reject(new Error(`Status HTTP: ${res.statusCode}`));
+      }
+      const fileStream = fs.createWriteStream(destPath);
+      res.pipe(fileStream);
+      fileStream.on('finish', () => {
+        fileStream.close();
+        resolve(true);
+      });
+      fileStream.on('error', reject);
+    }).on('error', reject);
+  });
+}
+
+// Instâncias públicas da Invidious API para contornar bloqueio de bot
+const INVIDIOUS_INSTANCES = [
+  'https://inv.nadeko.net',
+  'https://invidious.nerdvpn.de',
+  'https://invidious.jing.rocks',
+  'https://invidious.slipfox.xyz'
+];
+
+async function fetchAudioFromInvidious(videoId, destPath) {
+  for (const base of INVIDIOUS_INSTANCES) {
+    try {
+      const apiUrl = `${base}/api/v1/videos/${videoId}`;
+      const data = await new Promise((resolve, reject) => {
+        https.get(apiUrl, { timeout: 7000 }, (res) => {
+          let body = '';
+          res.on('data', chunk => body += chunk);
+          res.on('end', () => {
+            try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+          });
+        }).on('error', reject);
+      });
+
+      const audioFormats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio/'));
+      if (audioFormats.length > 0) {
+        // Escolhe o formato de áudio com taxa moderada
+        const target = audioFormats[0];
+        const audioUrl = target.url;
+        await downloadFile(audioUrl, destPath);
+        return true;
+      }
+    } catch (err) {
+      // Tenta próxima instância se falhar
+    }
+  }
+  throw new Error('Não foi possível obter áudio via API de streaming.');
+}
+
 async function downloadTrackAudio(query, destPath) {
   const searchRes = await yts(query);
   const video = searchRes.videos && searchRes.videos[0];
   if (!video) throw new Error('Vídeo não encontrado para ' + query);
 
-  return new Promise((resolve, reject) => {
-    const stream = ytdl(video.url, { filter: 'audioonly', quality: 'lowestaudio' });
-    const writeStream = fs.createWriteStream(destPath);
-    stream.pipe(writeStream);
-    writeStream.on('finish', () => resolve(true));
-    writeStream.on('error', reject);
-    stream.on('error', reject);
-  });
+  return await fetchAudioFromInvidious(video.videoId, destPath);
 }
 
-// Rotina em segundo plano de download das faixas do vinil
+// Processamento de download do disco em segundo plano
 async function processAlbumDownload(albumData, albumFolder, slug) {
   const allTracks = [
     ...(albumData.sideA || []).map((t, idx) => ({ track: t, side: 'A', num: idx + 1 })),
@@ -165,7 +217,6 @@ async function processAlbumDownload(albumData, albumFolder, slug) {
     }
   }
 
-  // Atualiza o manifest.json persistindo os links locais offline
   fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
   console.log(`[Sucesso: Disco 100% Offline]: ${albumData.title}`);
 }
@@ -180,7 +231,6 @@ app.post('/api/download-album', (req, res) => {
     const albumFolder = path.join(LIBRARY_DIR, slug);
     if (!fs.existsSync(albumFolder)) fs.mkdirSync(albumFolder, { recursive: true });
 
-    // Salva capa
     const lastCover = path.join(__dirname, 'last_scanned.jpg');
     if (fs.existsSync(lastCover)) {
       fs.copyFileSync(lastCover, path.join(albumFolder, 'cover.jpg'));
@@ -195,7 +245,6 @@ app.post('/api/download-album', (req, res) => {
     albumData.slug = slug;
     fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
 
-    // Dispara o download de todas as faixas em background
     processAlbumDownload(albumData, albumFolder, slug);
 
     res.json({ success: true, slug: slug });
@@ -205,7 +254,7 @@ app.post('/api/download-album', (req, res) => {
   }
 });
 
-// Rota para adicionar novas fotos no encarte oficial
+// Encarte
 app.post('/api/add-booklet', upload.single('page'), (req, res) => {
   try {
     const { slug } = req.body;
