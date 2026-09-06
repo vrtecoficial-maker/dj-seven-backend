@@ -190,7 +190,7 @@ app.post('/api/download-album', async (req, res) => {
       const q = (track.performer || album.artist || '') + ' ' + (track.title || '') + ' audio original';
       console.log('[Baixando]:', track.title);
       await new Promise(resolve => {
-        const p = spawn('yt-dlp', ['ytsearch1:' + query, '-f', 'ba/b', '-o', '-', '--no-playlist', '--extractor-args', 'youtube:player_client=android,web', '--no-check-certificates']);
+        const p = spawn('yt-dlp', ['ytsearch1:' + query, '-f', 'ba/b', '-o', '-', '--no-playlist', '--extractor-args', 'youtube:player_client=ios,mweb', '--js-runtimes', 'node', '--no-check-certificates']);
         p.on('close', resolve); p.on('error', resolve);
       });
     }
