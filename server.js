@@ -11,7 +11,8 @@ async function getYouTube() {
   if (!yt) {
     yt = await Innertube.create({
       cache: new UniversalCache(false),
-      generate_session_locally: true
+      generate_session_locally: true,
+      client_type: 'ANDROID'
     });
   }
   return yt;
@@ -21,7 +22,7 @@ app.get('/api/stream', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).send('Informe o parâmetro q');
 
-  console.log(`[Stream] Buscando no YouTube via InnerTube: ${query}`);
+  console.log(`[Stream] Buscando no YouTube: ${query}`);
 
   try {
     const youtube = await getYouTube();
@@ -36,7 +37,8 @@ app.get('/api/stream', async (req, res) => {
 
     const stream = await youtube.download(video.id, {
       type: 'audio',
-      quality: 'best'
+      quality: 'best',
+      client: 'ANDROID'
     });
 
     res.setHeader('Content-Type', 'audio/mp4');
