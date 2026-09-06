@@ -19,17 +19,18 @@ if (!fs.existsSync(LIBRARY_DIR)) fs.mkdirSync(LIBRARY_DIR, { recursive: true });
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static('www'));
 app.use('/library', express.static(LIBRARY_DIR));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
-// Modelos do Gemini para reconhecimento
+// O modelo flash-lite responde sem fila e sem erro 503
 const ACTIVE_MODELS = [
-  'gemini-3.6-flash',
-  'gemini-3.7-flash',
+  'gemini-3.1-flash-lite',
   'gemini-3.5-flash-lite',
-  'gemini-3.1-flash-lite'
+  'gemini-3.6-flash',
+  'gemini-3.7-flash'
 ];
 
 const scanCache = new Map();
@@ -77,8 +78,8 @@ Retorne exclusivamente JSON:
         return parsed;
       }
     } catch (e) {
-      console.warn('[Aviso]', modelName, 'falhou. Tentando próximo...', e.message);
-      await new Promise(r => setTimeout(r, 600));
+      console.warn('[Aviso]', modelName, 'instável. Tentando backup...', e.message);
+      await new Promise(r => setTimeout(r, 400));
     }
   }
 
@@ -105,12 +106,44 @@ app.post('/api/scan', upload.single('cover'), async (req, res) => {
   }
 });
 
-// Rota da Estante (leitura dos manifests e arquivos JSON)
+// Rota de Salvar Disco na Estante
+app.post('/api/library', (req, res) => {
+  try {
+    const albumData = req.body;
+    if (!albumData || !albumData.title) {
+      return res.status(400).json({ error: 'Dados do disco inválidos' });
+    }
+
+    const slug = (albumData.slug || albumData.title)
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '-')
+      .replace(/-+/g, '-');
+
+    const albumFolder = path.join(LIBRARY_DIR, slug);
+    if (!fs.existsSync(albumFolder)) fs.mkdirSync(albumFolder, { recursive: true });
+
+    // Salva cópia da última capa se existir
+    const lastCover = path.join(__dirname, 'last_scanned.jpg');
+    if (fs.existsSync(lastCover)) {
+      fs.copyFileSync(lastCover, path.join(albumFolder, 'cover.jpg'));
+      albumData.coverUrl = `/library/${slug}/cover.jpg`;
+    }
+
+    albumData.slug = slug;
+    fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
+
+    console.log('[Estante Salvo]:', albumData.title);
+    res.json({ success: true, album: albumData });
+  } catch (err) {
+    console.error('[Erro ao Salvar na Estante]:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Rota da Estante (leitura dos manifests)
 app.get('/api/library', (req, res) => {
   try {
     const albums = [];
-    
-    // Leitura por pastas manifest.json
     fs.readdirSync(LIBRARY_DIR).forEach(folder => {
       const p = path.join(LIBRARY_DIR, folder, 'manifest.json');
       if (fs.existsSync(p)) {
@@ -118,7 +151,6 @@ app.get('/api/library', (req, res) => {
       }
     });
 
-    // Compatibilidade com arquivos .json diretos
     fs.readdirSync(LIBRARY_DIR).filter(f => f.endsWith('.json') && f !== 'manifest.json').forEach(file => {
       try { albums.push(JSON.parse(fs.readFileSync(path.join(LIBRARY_DIR, file), 'utf-8'))); } catch (e) {}
     });
@@ -150,7 +182,7 @@ app.delete('/api/library/:slug', (req, res) => {
   }
 });
 
-// Rota de busca rápida do YouTube
+// Rota de busca do YouTube
 app.get('/api/search', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).json({ error: 'Informe a busca' });
