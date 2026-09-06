@@ -8,10 +8,10 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-// Entrega os arquivos visuais do app (HTML, CSS, JS) na raiz
+// Entrega os arquivos estáticos da pasta www (CSS, JS, imagens)
 app.use(express.static(path.join(__dirname, 'www')));
 
-// Rota de busca do YouTube
+// Rota leve de busca do YouTube
 app.get('/api/search', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).json({ error: 'Informe a busca' });
@@ -34,8 +34,8 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-// Qualquer outra rota abre o index.html
-app.get('*', (req, res) => {
+// Middleware compatível com Express 5 para entregar o index.html na raiz
+app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'www', 'index.html'));
 });
 
