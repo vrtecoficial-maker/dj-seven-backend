@@ -14,11 +14,13 @@
     "@capacitor/camera": "^8.2.4",
     "@capacitor/cli": "^8.5.1",
     "@capacitor/core": "^8.5.1",
+    "@distube/ytdl-core": "^4.16.12",
     "@google/genai": "^2.21.0",
     "axios": "^1.20.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "multer": "^2.3.0",
-    "play-dl": "^1.9.7"
+    "play-dl": "^1.9.7",
+    "ytsr": "^3.8.4"
   }
 }
