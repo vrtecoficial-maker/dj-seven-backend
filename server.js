@@ -25,7 +25,6 @@ app.use(express.static('www'));
 app.use('/library', express.static(LIBRARY_DIR));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
-// O modelo flash-lite responde sem fila e sem erro 503
 const ACTIVE_MODELS = [
   'gemini-3.1-flash-lite',
   'gemini-3.5-flash-lite',
@@ -86,7 +85,7 @@ Retorne exclusivamente JSON:
   throw new Error('Falha no reconhecimento da capa');
 }
 
-// Rota de Scan (IA do Gemini)
+// Rota de Scan
 app.post('/api/scan', upload.single('cover'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Sem imagem' });
   const imagePath = req.file.path;
@@ -106,41 +105,53 @@ app.post('/api/scan', upload.single('cover'), async (req, res) => {
   }
 });
 
-// Rota de Salvar Disco na Estante
-app.post('/api/library', (req, res) => {
+// Função para salvar álbum na estante
+function saveAlbumToLibrary(albumData) {
+  const slug = (albumData.slug || albumData.title || 'album')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+
+  const albumFolder = path.join(LIBRARY_DIR, slug);
+  if (!fs.existsSync(albumFolder)) fs.mkdirSync(albumFolder, { recursive: true });
+
+  const lastCover = path.join(__dirname, 'last_scanned.jpg');
+  if (fs.existsSync(lastCover)) {
+    fs.copyFileSync(lastCover, path.join(albumFolder, 'cover.jpg'));
+    albumData.coverUrl = `/library/${slug}/cover.jpg`;
+  }
+
+  albumData.slug = slug;
+  fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
+  return slug;
+}
+
+// Rota chamada pelo botão "Baixar Disco para Estante"
+app.post('/api/download-album', (req, res) => {
   try {
     const albumData = req.body;
-    if (!albumData || !albumData.title) {
-      return res.status(400).json({ error: 'Dados do disco inválidos' });
-    }
-
-    const slug = (albumData.slug || albumData.title)
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, '-')
-      .replace(/-+/g, '-');
-
-    const albumFolder = path.join(LIBRARY_DIR, slug);
-    if (!fs.existsSync(albumFolder)) fs.mkdirSync(albumFolder, { recursive: true });
-
-    // Salva cópia da última capa se existir
-    const lastCover = path.join(__dirname, 'last_scanned.jpg');
-    if (fs.existsSync(lastCover)) {
-      fs.copyFileSync(lastCover, path.join(albumFolder, 'cover.jpg'));
-      albumData.coverUrl = `/library/${slug}/cover.jpg`;
-    }
-
-    albumData.slug = slug;
-    fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
-
-    console.log('[Estante Salvo]:', albumData.title);
-    res.json({ success: true, album: albumData });
-  } catch (err) {
-    console.error('[Erro ao Salvar na Estante]:', err.message);
-    res.status(500).json({ error: err.message });
+    if (!albumData || !albumData.title) return res.status(400).json({ error: 'Dados inválidos' });
+    const slug = saveAlbumToLibrary(albumData);
+    console.log('[Disco Guardado]:', slug);
+    res.json({ success: true, slug: slug });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-// Rota da Estante (leitura dos manifests)
+app.post('/api/library', (req, res) => {
+  try {
+    const slug = saveAlbumToLibrary(req.body);
+    res.json({ success: true, slug: slug });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Rota de listagem da estante
 app.get('/api/library', (req, res) => {
   try {
     const albums = [];
@@ -150,30 +161,18 @@ app.get('/api/library', (req, res) => {
         try { albums.push(JSON.parse(fs.readFileSync(p, 'utf-8'))); } catch (e) {}
       }
     });
-
-    fs.readdirSync(LIBRARY_DIR).filter(f => f.endsWith('.json') && f !== 'manifest.json').forEach(file => {
-      try { albums.push(JSON.parse(fs.readFileSync(path.join(LIBRARY_DIR, file), 'utf-8'))); } catch (e) {}
-    });
-
     res.json(albums);
   } catch (err) {
     res.status(500).json({ error: 'Erro na estante' });
   }
 });
 
-// Rota de exclusão da estante
+// Rota de exclusão
 app.delete('/api/library/:slug', (req, res) => {
   try {
-    const slug = req.params.slug;
-    const folderPath = path.join(LIBRARY_DIR, slug);
-    const filePath = path.join(LIBRARY_DIR, `${slug}.json`);
-
+    const folderPath = path.join(LIBRARY_DIR, req.params.slug);
     if (fs.existsSync(folderPath)) {
       fs.rmSync(folderPath, { recursive: true, force: true });
-      return res.json({ success: true });
-    }
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
       return res.json({ success: true });
     }
     res.status(404).json({ error: 'Disco não encontrado' });
@@ -182,7 +181,7 @@ app.delete('/api/library/:slug', (req, res) => {
   }
 });
 
-// Rota de busca do YouTube
+// Busca no YouTube
 app.get('/api/search', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).json({ error: 'Informe a busca' });
@@ -190,10 +189,7 @@ app.get('/api/search', async (req, res) => {
   try {
     const results = await yts(query);
     const video = results.videos && results.videos[0];
-
-    if (!video) {
-      return res.status(404).json({ error: 'Nenhum vídeo encontrado' });
-    }
+    if (!video) return res.status(404).json({ error: 'Vídeo não encontrado' });
 
     res.json({
       title: video.title,

@@ -160,6 +160,7 @@ function playTrack(index) {
 }
 
 function pauseTrack() {
+  if (typeof ytPlayer !== "undefined" && ytPlayer && ytPlayer.pauseVideo) { ytPlayer.pauseVideo(); }
   audioPlayer.pause();
   setTonearmAngle(ANGLE_REST, true);
   mainDisc.classList.remove('rotating');
@@ -193,7 +194,7 @@ audioPlayer.addEventListener('timeupdate', () => {
 
 playBtn.addEventListener('click', () => {
   if (isPlaying) pauseTrack();
-  else playTrack(currentTrackIndex);
+  else { if (typeof ytPlayer !== "undefined" && ytPlayer && ytPlayer.playVideo) { ytPlayer.playVideo(); isPlaying = true; playBtn.textContent = "⏸"; mainDisc.classList.add("rotating"); } else { playTrack(currentTrackIndex); } }
 });
 
 // Giro 3D sem perder arte
