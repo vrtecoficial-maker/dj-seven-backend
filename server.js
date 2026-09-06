@@ -4,6 +4,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { exec } = require('child_process');
 const { GoogleGenAI } = require('@google/genai');
 const yts = require('yt-search');
 
@@ -25,7 +26,6 @@ app.use(express.static('www'));
 app.use('/library', express.static(LIBRARY_DIR));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
-// 3.7-flash responde em 4 segundos e sem fila 503
 const ACTIVE_MODELS = [
   'gemini-3.7-flash',
   'gemini-3.6-flash',
@@ -69,7 +69,6 @@ Retorne exclusivamente JSON:
 
         parsed.sideA = fix(parsed.sideA);
         parsed.sideB = fix(parsed.sideB);
-
         if (parsed.sideA.length === 0) parsed.sideA = [{ title: 'Faixa 1', performer: parsed.artist, duration: '3:30' }];
         if (parsed.sideB.length === 0) parsed.sideB = [{ title: 'Faixa 1 (Lado B)', performer: parsed.artist, duration: '3:30' }];
 
@@ -105,49 +104,132 @@ app.post('/api/scan', upload.single('cover'), async (req, res) => {
   }
 });
 
-// Salvar na estante
-function saveAlbumToLibrary(albumData) {
-  const slug = (albumData.slug || albumData.title || 'album')
+// Helper para sanitizar slug
+function makeSlug(name) {
+  return (name || 'album')
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
-
-  const albumFolder = path.join(LIBRARY_DIR, slug);
-  if (!fs.existsSync(albumFolder)) fs.mkdirSync(albumFolder, { recursive: true });
-
-  const lastCover = path.join(__dirname, 'last_scanned.jpg');
-  if (fs.existsSync(lastCover)) {
-    fs.copyFileSync(lastCover, path.join(albumFolder, 'cover.jpg'));
-    albumData.coverUrl = `/library/${slug}/cover.jpg`;
-  }
-
-  albumData.slug = slug;
-  fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
-  return slug;
 }
 
+// Download em segundo plano das músicas via yt-dlp
+async function downloadTracksInBackground(albumData, albumFolder, slug) {
+  console.log(`[Download Offline Iniciado]: ${albumData.title}`);
+  const allTracks = [
+    ...(albumData.sideA || []).map((t, i) => ({ ...t, side: 'A', index: i })),
+    ...(albumData.sideB || []).map((t, i) => ({ ...t, side: 'B', index: i }))
+  ];
+
+  for (const track of allTracks) {
+    const filename = `track_${track.side}_${track.index + 1}.mp3`;
+    const targetPath = path.join(albumFolder, filename);
+
+    if (fs.existsSync(targetPath)) {
+      track.localUrl = `/library/${slug}/${filename}`;
+      continue;
+    }
+
+    try {
+      const query = `${track.performer || albumData.artist} ${track.title} audio original`;
+      const searchRes = await yts(query);
+      const video = searchRes.videos && searchRes.videos[0];
+
+      if (video && video.url) {
+        console.log(`[Baixando Faixa Lado ${track.side} - ${track.title}]...`);
+        await new Promise((resolve) => {
+          exec(`yt-dlp -x --audio-format mp3 --audio-quality 5 -o "${targetPath}" "${video.url}"`, (err) => {
+            if (!err && fs.existsSync(targetPath)) {
+              track.localUrl = `/library/${slug}/${filename}`;
+              console.log(`[Faixa Salva]: ${filename}`);
+            } else {
+              console.warn(`[Falha download]: ${track.title}`);
+            }
+            resolve();
+          });
+        });
+      }
+    } catch (e) {
+      console.error(`[Erro ao buscar faixa offline]:`, e.message);
+    }
+  }
+
+  // Atualiza o manifest.json com os links locais prontos
+  fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
+  console.log(`[Álbum Completo Pronto para Modo Offline]: ${albumData.title}`);
+}
+
+// Rota de Baixar Álbum Completo para Estante
 app.post('/api/download-album', (req, res) => {
   try {
-    const slug = saveAlbumToLibrary(req.body);
-    console.log('[Estante Guardado]:', slug);
+    const albumData = req.body;
+    if (!albumData || !albumData.title) return res.status(400).json({ error: 'Dados inválidos' });
+
+    const slug = makeSlug(albumData.slug || albumData.title);
+    const albumFolder = path.join(LIBRARY_DIR, slug);
+    if (!fs.existsSync(albumFolder)) fs.mkdirSync(albumFolder, { recursive: true });
+
+    // Salva a capa principal
+    const lastCover = path.join(__dirname, 'last_scanned.jpg');
+    if (fs.existsSync(lastCover)) {
+      fs.copyFileSync(lastCover, path.join(albumFolder, 'cover.jpg'));
+      albumData.cover = `/library/${slug}/cover.jpg`;
+    }
+
+    if (!albumData.artworks) albumData.artworks = [];
+    if (albumData.cover && !albumData.artworks.includes(albumData.cover)) {
+      albumData.artworks.push(albumData.cover);
+    }
+
+    albumData.slug = slug;
+    fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
+
+    // Inicia download offline dos MP3s em segundo plano
+    downloadTracksInBackground(albumData, albumFolder, slug);
+
     res.json({ success: true, slug: slug });
   } catch (e) {
+    console.error('[Erro em download-album]:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-app.post('/api/library', (req, res) => {
+// Rota para adicionar páginas do encarte / contracapa
+app.post('/api/add-booklet', upload.single('page'), (req, res) => {
   try {
-    const slug = saveAlbumToLibrary(req.body);
-    res.json({ success: true, slug: slug });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    const { slug } = req.body;
+    if (!slug || !req.file) return res.status(400).json({ error: 'Dados incompletos' });
+
+    const albumFolder = path.join(LIBRARY_DIR, slug);
+    const manifestPath = path.join(albumFolder, 'manifest.json');
+
+    if (!fs.existsSync(manifestPath)) {
+      return res.status(404).json({ error: 'Álbum não encontrado na Estante' });
+    }
+
+    const album = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    if (!album.artworks) album.artworks = [];
+
+    const pageFileName = `booklet_${Date.now()}.jpg`;
+    const targetFile = path.join(albumFolder, pageFileName);
+    fs.copyFileSync(req.file.path, targetFile);
+    fs.unlinkSync(req.file.path);
+
+    const relativeUrl = `/library/${slug}/${pageFileName}`;
+    album.artworks.push(relativeUrl);
+
+    fs.writeFileSync(manifestPath, JSON.stringify(album, null, 2));
+    console.log(`[Nova Página de Encarte Adicionada]: ${relativeUrl}`);
+
+    res.json({ success: true, artworks: album.artworks });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
+// Listagem da Estante
 app.get('/api/library', (req, res) => {
   try {
     const albums = [];
@@ -163,6 +245,7 @@ app.get('/api/library', (req, res) => {
   }
 });
 
+// Exclusão da Estante
 app.delete('/api/library/:slug', (req, res) => {
   try {
     const folderPath = path.join(LIBRARY_DIR, req.params.slug);
@@ -176,25 +259,22 @@ app.delete('/api/library/:slug', (req, res) => {
   }
 });
 
-// Busca no YouTube
+// Busca no YouTube (modo online streaming)
 app.get('/api/search', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).json({ error: 'Informe a busca' });
 
-  console.log('[YouTube Buscando]:', query);
   try {
     const results = await yts(query);
     const video = results.videos && results.videos[0];
     if (!video) return res.status(404).json({ error: 'Vídeo não encontrado' });
 
-    console.log('[YouTube Encontrado]:', video.title, '(' + video.videoId + ')');
     res.json({
       title: video.title,
       videoId: video.videoId,
       thumbnail: video.thumbnail
     });
   } catch (err) {
-    console.error('[YouTube Erro]:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
