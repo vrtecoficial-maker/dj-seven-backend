@@ -23,6 +23,7 @@
     "play-dl": "^1.9.7",
     "youtubei.js": "^18.0.0",
     "yt-search": "^2.13.1",
+    "yt-stream": "^1.7.4",
     "ytsr": "^3.8.4"
   }
 }
