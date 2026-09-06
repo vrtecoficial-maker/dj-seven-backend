@@ -1,12 +1,9 @@
 const express = require('express');
 const ytdl = require('@distube/ytdl-core');
-const ytsr = require('ytsr');
-const path = require('path');
+const yts = require('yt-search');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-process.env.PATH = path.join(process.cwd(), 'bin') + ':' + process.env.PATH;
 
 app.get('/api/stream', async (req, res) => {
   const query = req.query.q;
@@ -15,29 +12,38 @@ app.get('/api/stream', async (req, res) => {
   console.log(`[Stream] Buscando: ${query}`);
 
   try {
-    const filters = await ytsr.getFilters(query);
-    const filterVideo = filters.get('Type').get('Video');
-    const searchResults = await ytsr(filterVideo.url, { limit: 1 });
+    const searchResults = await yts(query);
+    const video = searchResults.videos && searchResults.videos[0];
 
-    if (!searchResults.items.length) {
-      return res.status(404).send('Nenhum resultado encontrado');
+    if (!video || !video.url) {
+      return res.status(404).send('Nenhum vídeo encontrado');
     }
 
-    const videoUrl = searchResults.items[0].url;
-    console.log(`[Stream] Reproduzindo: ${videoUrl}`);
+    console.log(`[Stream] Encontrado: ${video.title} (${video.url})`);
 
     res.setHeader('Content-Type', 'audio/mpeg');
 
-    ytdl(videoUrl, {
+    const stream = ytdl(video.url, {
       filter: 'audioonly',
       quality: 'highestaudio',
       highWaterMark: 1 << 25
-    }).pipe(res);
+    });
+
+    stream.on('error', (err) => {
+      console.error(`[Erro ytdl]: ${err.message}`);
+      if (!res.headersSent) res.status(500).send(err.message);
+    });
+
+    stream.pipe(res);
+
+    req.on('close', () => {
+      stream.destroy();
+    });
 
   } catch (err) {
     console.error(`[Erro no Stream] ${err.message}`);
     if (!res.headersSent) {
-      res.status(500).send('Erro ao processar áudio: ' + err.message);
+      res.status(500).send('Erro ao buscar vídeo: ' + err.message);
     }
   }
 });
