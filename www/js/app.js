@@ -452,18 +452,24 @@ btnDownloadAlbum.addEventListener('click', async () => {
     const query = (t.performer || albumData.artist) + ' ' + trackName + ' audio original';
     
     try {
-      // Baixa via backend
-      const resp = await fetch('https://dj-seven-backend.onrender.com/api/get-audio?q=' + encodeURIComponent(query));
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 18000);
+      
+      const resp = await fetch('https://dj-seven-backend.onrender.com/api/get-audio?q=' + encodeURIComponent(query), {
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+
       if (resp.ok) {
         const audioBlob = await resp.blob();
-        if (audioBlob.size > 100000) { // Garante que não é payload vazio/erro
+        if (audioBlob.size > 50000) {
           await saveOfflineTrackAudio(trackKey, audioBlob);
           downloadedCount++;
           continue;
         }
       }
     } catch (e) {
-      console.warn('Erro ao baixar ' + trackName, e);
+      console.warn('Timeout ou erro na faixa:', trackName);
     }
   }
 
