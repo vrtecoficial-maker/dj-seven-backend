@@ -4,7 +4,6 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const http = require('http');
 const https = require('https');
 const { GoogleGenAI } = require('@google/genai');
 const yts = require('yt-search');
@@ -91,7 +90,6 @@ Retorne ESTRITAMENTE em formato JSON:
   throw new Error('Falha no reconhecimento da capa');
 }
 
-// Rota de Scan
 app.post('/api/scan', upload.single('cover'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Sem imagem' });
   const imagePath = req.file.path;
@@ -121,69 +119,7 @@ function makeSlug(name) {
     .replace(/^-|-$/g, '');
 }
 
-// Download com redirecionamento
-function downloadFile(url, destPath) {
-  return new Promise((resolve, reject) => {
-    const proto = url.startsWith('https') ? https : http;
-    proto.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } }, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return downloadFile(res.headers.location, destPath).then(resolve).catch(reject);
-      }
-      if (res.statusCode !== 200) {
-        return reject(new Error(`Status HTTP: ${res.statusCode}`));
-      }
-      const fileStream = fs.createWriteStream(destPath);
-      res.pipe(fileStream);
-      fileStream.on('finish', () => {
-        fileStream.close();
-        resolve(true);
-      });
-      fileStream.on('error', reject);
-    }).on('error', reject);
-  });
-}
-
-// Servidores Piped API
-const PIPED_SERVERS = [
-  'https://api.piped.privacy.com.de',
-  'https://pipedapi.tokhmi.xyz',
-  'https://pipedapi.kavin.rocks',
-  'https://api-piped.mha.fi'
-];
-
-async function getAudioStreamUrl(videoId) {
-  for (const server of PIPED_SERVERS) {
-    try {
-      const endpoint = `${server}/streams/${videoId}`;
-      const json = await new Promise((resolve, reject) => {
-        https.get(endpoint, { timeout: 6000, headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
-          if (res.statusCode !== 200) return reject(new Error('Status ' + res.statusCode));
-          let data = '';
-          res.on('data', c => data += c);
-          res.on('end', () => {
-            try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
-          });
-        }).on('error', reject);
-      });
-
-      const audio = (json.audioStreams || []).find(s => s.url);
-      if (audio && audio.url) return audio.url;
-    } catch (e) {}
-  }
-  throw new Error('Serviço de stream indisponível no momento');
-}
-
-async function downloadTrackAudio(query, destPath) {
-  const searchRes = await yts(query);
-  const video = searchRes.videos && searchRes.videos[0];
-  if (!video) throw new Error('Vídeo não encontrado para ' + query);
-
-  const audioUrl = await getAudioStreamUrl(video.videoId);
-  return await downloadFile(audioUrl, destPath);
-}
-
-// Rota de stream direto para o celular baixar individualmente
-
+// Rota de entrega de áudio via API Piped
 app.get('/api/get-audio', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).send('Query ausente');
@@ -216,7 +152,7 @@ app.get('/api/get-audio', async (req, res) => {
 
         const audio = (streamData.audioStreams || []).find(s => s.url);
         if (audio && audio.url) {
-          console.log('[Stream Encontrado via Piped]: Redirecionando áudio');
+          console.log('[Stream Encontrado]: Redirecionando áudio');
           return res.redirect(audio.url);
         }
       } catch (e) {}
@@ -228,45 +164,6 @@ app.get('/api/get-audio', async (req, res) => {
     res.status(500).send(err.message);
   }
 });
-  }).catch(e => {
-    console.error(e);
-    if (!res.headersSent) res.status(500).send(e.message);
-  });
-});
-
-
-// Download do disco
-async function processAlbumDownload(albumData, albumFolder, slug) {
-  const allTracks = [
-    ...(albumData.sideA || []).map((t, idx) => ({ track: t, side: 'A', num: idx + 1 })),
-    ...(albumData.sideB || []).map((t, idx) => ({ track: t, side: 'B', num: idx + 1 }))
-  ];
-
-  console.log(`[Iniciando Download Completo Offline]: ${albumData.title}`);
-
-  for (const item of allTracks) {
-    const fileName = `track_${item.side}_${item.num}.mp3`;
-    const filePath = path.join(albumFolder, fileName);
-
-    if (!fs.existsSync(filePath)) {
-      try {
-        const q = `${item.track.performer || albumData.artist} ${item.track.title} audio original`;
-        console.log(`[Baixando Faixa Lado ${item.side} Faixa ${item.num}]: ${item.track.title}...`);
-        await downloadTrackAudio(q, filePath);
-        console.log(`[Baixado]: ${fileName}`);
-      } catch (err) {
-        console.warn(`[Falha no áudio da faixa ${item.track.title}]:`, err.message);
-      }
-    }
-
-    if (fs.existsSync(filePath)) {
-      item.track.localUrl = `/library/${slug}/${fileName}`;
-    }
-  }
-
-  fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
-  console.log(`[Sucesso: Disco 100% Offline]: ${albumData.title}`);
-}
 
 app.post('/api/download-album', (req, res) => {
   try {
@@ -283,43 +180,11 @@ app.post('/api/download-album', (req, res) => {
       albumData.cover = `/library/${slug}/cover.jpg`;
     }
 
-    if (!albumData.artworks) albumData.artworks = [];
-    if (albumData.cover && !albumData.artworks.includes(albumData.cover)) {
-      albumData.artworks.push(albumData.cover);
-    }
-
     albumData.slug = slug;
     fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
-
-    processAlbumDownload(albumData, albumFolder, slug);
     res.json({ success: true, slug: slug });
   } catch (e) {
     res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/add-booklet', upload.single('page'), (req, res) => {
-  try {
-    const { slug } = req.body;
-    if (!slug || !req.file) return res.status(400).json({ error: 'Dados incompletos' });
-
-    const albumFolder = path.join(LIBRARY_DIR, slug);
-    const manifestPath = path.join(albumFolder, 'manifest.json');
-    if (!fs.existsSync(manifestPath)) return res.status(404).json({ error: 'Disco não encontrado' });
-
-    const album = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-    if (!album.artworks) album.artworks = [];
-
-    const pageName = `booklet_${Date.now()}.jpg`;
-    fs.copyFileSync(req.file.path, path.join(albumFolder, pageName));
-    fs.unlinkSync(req.file.path);
-
-    album.artworks.push(`/library/${slug}/${pageName}`);
-    fs.writeFileSync(manifestPath, JSON.stringify(album, null, 2));
-
-    res.json({ success: true, artworks: album.artworks });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
   }
 });
 
