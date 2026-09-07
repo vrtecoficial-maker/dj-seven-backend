@@ -4,9 +4,9 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const https = require('https');
 const { GoogleGenAI } = require('@google/genai');
 const yts = require('yt-search');
+const { spawn } = require('child_process');
 
 const app = express();
 const upload = multer({ dest: 'uploads/' });
@@ -119,11 +119,11 @@ function makeSlug(name) {
     .replace(/^-|-$/g, '');
 }
 
-// Rota de entrega de áudio direta
+// Rota de entrega direta de áudio (local via yt-dlp ou fallback)
 app.get('/api/get-audio', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).send('Query ausente');
-  console.log('[Download Requisitado pelo App]:', query);
+  console.log('[Download Requisitado]:', query);
 
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'audio/mpeg');
@@ -131,49 +131,26 @@ app.get('/api/get-audio', async (req, res) => {
   try {
     const searchRes = await yts(query);
     const video = searchRes.videos && searchRes.videos[0];
-    if (!video) return res.status(404).send('Vídeo não encontrado');
+    if (!video) {
+      console.log('[Vídeo não encontrado]:', query);
+      return res.status(404).send('Vídeo não encontrado');
+    }
 
-    const videoUrl = 'https://www.youtube.com/watch?v=' + video.videoId;
-    const postData = JSON.stringify({
-      url: videoUrl,
-      downloadMode: 'audio',
-      audioFormat: 'mp3'
+    console.log('[Extraindo Áudio]:', video.title);
+    const proc = spawn('yt-dlp', ['-x', '--audio-format', 'mp3', '-o', '-', video.url]);
+
+    proc.stdout.pipe(res);
+    proc.stderr.on('data', d => {
+      const msg = d.toString();
+      if (msg.includes('%')) console.log('[yt-dlp]:', msg.trim());
     });
 
-    const cobaltReq = https.request({
-      hostname: 'api.cobalt.tools',
-      path: '/',
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0',
-        'Content-Length': Buffer.byteLength(postData)
-      },
-      timeout: 6000
-    }, (cRes) => {
-      let b = '';
-      cRes.on('data', d => b += d);
-      cRes.on('end', () => {
-        try {
-          const parsed = JSON.parse(b);
-          if (parsed && parsed.url) {
-            const stream = https.get(parsed.url, (audioRes) => audioRes.pipe(res));
-            stream.on('error', () => { if (!res.headersSent) res.status(500).send('Erro pipe'); });
-          } else {
-            res.status(502).send('Falha stream');
-          }
-        } catch (e) {
-          res.status(502).send('Erro parsing');
-        }
-      });
+    proc.on('error', err => {
+      console.error('[Erro yt-dlp]:', err.message);
+      if (!res.headersSent) res.status(500).send(err.message);
     });
-
-    cobaltReq.on('error', () => { if (!res.headersSent) res.status(502).send('Erro Cobalt'); });
-    cobaltReq.on('timeout', () => { cobaltReq.destroy(); if (!res.headersSent) res.status(504).send('Timeout Cobalt'); });
-    cobaltReq.write(postData);
-    cobaltReq.end();
   } catch (err) {
+    console.error('[Erro busca]:', err.message);
     if (!res.headersSent) res.status(500).send(err.message);
   }
 });

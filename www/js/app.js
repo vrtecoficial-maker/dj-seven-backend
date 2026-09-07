@@ -455,9 +455,14 @@ btnDownloadAlbum.addEventListener('click', async () => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 18000);
       
-      const resp = await fetch('https://dj-seven-backend.onrender.com/api/get-audio?q=' + encodeURIComponent(query), {
-        signal: controller.signal
-      });
+      let resp = null;
+      try {
+        // Tenta baixar direto do Termux rodando no celular
+        resp = await fetch('http://127.0.0.1:3000/api/get-audio?q=' + encodeURIComponent(query), { signal: controller.signal });
+      } catch(e) {
+        // Se o Termux estiver desligado, tenta a rota na nuvem
+        resp = await fetch('https://dj-seven-backend.onrender.com/api/get-audio?q=' + encodeURIComponent(query), { signal: controller.signal });
+      }
       clearTimeout(timer);
 
       if (resp.ok) {
