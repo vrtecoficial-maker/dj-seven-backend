@@ -119,7 +119,7 @@ function makeSlug(name) {
     .replace(/^-|-$/g, '');
 }
 
-// Rota de entrega de áudio direta via pipe
+// Rota de entrega de áudio direta
 app.get('/api/get-audio', async (req, res) => {
   const query = req.query.q;
   if (!query) return res.status(400).send('Query ausente');
@@ -131,59 +131,49 @@ app.get('/api/get-audio', async (req, res) => {
   try {
     const searchRes = await yts(query);
     const video = searchRes.videos && searchRes.videos[0];
-    if (!video) {
-      console.log('[Vídeo não encontrado]:', query);
-      return res.status(404).send('Vídeo não encontrado');
-    }
+    if (!video) return res.status(404).send('Vídeo não encontrado');
 
-    const videoId = video.videoId;
-    const ENDPOINTS = [
-      `https://api.piped.privacy.com.de/streams/${videoId}`,
-      `https://pipedapi.tokhmi.xyz/streams/${videoId}`,
-      `https://pipedapi.kavin.rocks/streams/${videoId}`
-    ];
+    const videoUrl = 'https://www.youtube.com/watch?v=' + video.videoId;
+    const postData = JSON.stringify({
+      url: videoUrl,
+      downloadMode: 'audio',
+      audioFormat: 'mp3'
+    });
 
-    let resolvedStream = null;
-
-    for (const url of ENDPOINTS) {
-      try {
-        const streamData = await new Promise((resolve, reject) => {
-          const r = https.get(url, { timeout: 3500, headers: { 'User-Agent': 'Mozilla/5.0' } }, (resp) => {
-            if (resp.statusCode !== 200) return reject(new Error('Status ' + resp.statusCode));
-            let body = '';
-            resp.on('data', d => body += d);
-            resp.on('end', () => {
-              try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
-            });
-          });
-          r.on('timeout', () => { r.destroy(); reject(new Error('Timeout')); });
-          r.on('error', reject);
-        });
-
-        const targetAudio = (streamData.audioStreams || []).find(s => s.url);
-        if (targetAudio && targetAudio.url) {
-          resolvedStream = targetAudio.url;
-          break;
+    const cobaltReq = https.request({
+      hostname: 'api.cobalt.tools',
+      path: '/',
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0',
+        'Content-Length': Buffer.byteLength(postData)
+      },
+      timeout: 6000
+    }, (cRes) => {
+      let b = '';
+      cRes.on('data', d => b += d);
+      cRes.on('end', () => {
+        try {
+          const parsed = JSON.parse(b);
+          if (parsed && parsed.url) {
+            const stream = https.get(parsed.url, (audioRes) => audioRes.pipe(res));
+            stream.on('error', () => { if (!res.headersSent) res.status(500).send('Erro pipe'); });
+          } else {
+            res.status(502).send('Falha stream');
+          }
+        } catch (e) {
+          res.status(502).send('Erro parsing');
         }
-      } catch (err) {}
-    }
-
-    if (!resolvedStream) {
-      console.warn('[Falha nos endpoints de stream]:', query);
-      return res.status(502).send('Streams indisponíveis');
-    }
-
-    const streamReq = https.get(resolvedStream, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (audioRes) => {
-      audioRes.pipe(res);
+      });
     });
 
-    streamReq.on('error', (e) => {
-      console.error('[Erro no pipe]:', e.message);
-      if (!res.headersSent) res.status(500).send(e.message);
-    });
-
+    cobaltReq.on('error', () => { if (!res.headersSent) res.status(502).send('Erro Cobalt'); });
+    cobaltReq.on('timeout', () => { cobaltReq.destroy(); if (!res.headersSent) res.status(504).send('Timeout Cobalt'); });
+    cobaltReq.write(postData);
+    cobaltReq.end();
   } catch (err) {
-    console.error('[Erro geral get-audio]:', err.message);
     if (!res.headersSent) res.status(500).send(err.message);
   }
 });
