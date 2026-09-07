@@ -1,4 +1,14 @@
 
+const LOCAL_API = 'http://localhost:3000';
+const RENDER_API = '';
+let activeBackend = LOCAL_API;
+
+// Teste rápido para detectar se o backend está local no aparelho
+fetch(LOCAL_API + '/api/library', { method: 'HEAD', mode: 'no-cors' })
+  .then(() => { activeBackend = LOCAL_API; })
+  .catch(() => { activeBackend = RENDER_API; });
+
+
 async function saveTrackAudioBlob(key, blob) {
   const db = await openOfflineDB();
   return new Promise((resolve, reject) => {
@@ -246,7 +256,7 @@ function playTrack(index) {
   } else {
     const who = track.performer || albumData.artist;
     const cleanSearch = who + ' ' + name + ' audio original';
-    fetch("https://dj-seven-backend.onrender.com/api/search?q=" + encodeURIComponent(cleanSearch))
+    fetch(activeBackend + "/api/search?q=" + encodeURIComponent(cleanSearch))
       .then(r => r.json())
       .then(d => {
         if (d.videoId && ytPlayer && ytPlayer.loadVideoById) {
@@ -362,7 +372,7 @@ async function handleImageFile(file) {
   formData.append('cover', optimizedBlob, 'cover.jpg');
 
   try {
-    const res = await fetch('/api/scan', { method: 'POST', body: formData });
+    const res = await fetch(activeBackend + '/api/scan', { method: 'POST', body: formData });
     if (!res.ok) throw new Error('Erro de resposta');
     const data = await res.json();
 
@@ -413,16 +423,19 @@ btnDownloadAlbum.addEventListener('click', async () => {
       const q = (t.performer || albumData.artist) + ' ' + (t.title || t.name) + ' audio original';
       trackStatusEl.innerHTML = '<span class="needle-icon">•</span> BAIXANDO FAIXA ' + (i + 1) + '/' + allTracks.length + '...';
       try {
-        const resp = await fetch('https://dj-seven-backend.onrender.com/api/get-audio?q=' + encodeURIComponent(q));
-        if (resp.ok) {
-          const blob = await resp.blob();
-          const base64Audio = await new Promise((res) => {
-            const reader = new FileReader();
-            reader.onloadend = () => res(reader.result);
-            reader.readAsDataURL(blob);
-          });
-          t.localUrl = base64Audio;
-        }
+        const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
+      const resp = await fetch(activeBackend + '/api/get-audio?q=' + encodeURIComponent(q), { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (resp.ok) {
+        const blob = await resp.blob();
+        const base64Audio = await new Promise((res) => {
+          const reader = new FileReader();
+          reader.onloadend = () => res(reader.result);
+          reader.readAsDataURL(blob);
+        });
+        t.localUrl = base64Audio;
+      }
       } catch (err) {
         console.warn('Erro ao baixar faixa:', t.title, err);
       }
@@ -446,7 +459,7 @@ async function loadShelf() {
     
     if (!albums || albums.length === 0) {
       try {
-        const res = await fetch('/api/library');
+        const res = await fetch(activeBackend + '/api/library');
         albums = await res.json();
       } catch(e) {}
     }
@@ -496,7 +509,7 @@ async function loadShelf() {
         e.stopPropagation();
         if (confirm(`Deseja apagar definitivamente o disco "${item.title}" da sua estante e liberar espaço no celular?`)) {
           try {
-            const delRes = await fetch('/api/library/' + item.slug, { method: 'DELETE' });
+            const delRes = await fetch(activeBackend + '/api/library/' + item.slug, { method: 'DELETE' });
             if (delRes.ok) loadShelf();
             else alert('Erro ao apagar o disco');
           } catch (err) {
@@ -562,7 +575,7 @@ bookletFileInput.addEventListener('change', async (e) => {
   formData.append('page', file);
 
   try {
-    const res = await fetch('/api/add-booklet', { method: 'POST', body: formData });
+    const res = await fetch(activeBackend + '/api/add-booklet', { method: 'POST', body: formData });
     const data = await res.json();
     if (data.success) {
       albumData.artworks = data.artworks;
