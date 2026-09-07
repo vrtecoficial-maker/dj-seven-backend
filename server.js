@@ -183,20 +183,57 @@ async function downloadTrackAudio(query, destPath) {
 }
 
 // Rota de stream direto para o celular baixar individualmente
+
 app.get('/api/get-audio', async (req, res) => {
   const query = req.query.q;
-  if (!query) return res.status(400).send('Sem busca');
+  if (!query) return res.status(400).send('Query ausente');
+  console.log('[Download Requisitado pelo App]:', query);
+
   try {
     const searchRes = await yts(query);
     const video = searchRes.videos && searchRes.videos[0];
     if (!video) return res.status(404).send('Vídeo não encontrado');
 
-    const streamUrl = await getAudioStreamUrl(video.videoId);
-    res.redirect(streamUrl);
+    const PIPED_APIS = [
+      'https://api.piped.privacy.com.de',
+      'https://pipedapi.tokhmi.xyz',
+      'https://pipedapi.kavin.rocks',
+      'https://api-piped.mha.fi'
+    ];
+
+    for (const base of PIPED_APIS) {
+      try {
+        const streamData = await new Promise((resolve, reject) => {
+          https.get(base + '/streams/' + video.videoId, { timeout: 5000, headers: { 'User-Agent': 'Mozilla/5.0' } }, (r) => {
+            if (r.statusCode !== 200) return reject(new Error('Status ' + r.statusCode));
+            let d = '';
+            r.on('data', c => d += c);
+            r.on('end', () => {
+              try { resolve(JSON.parse(d)); } catch(e) { reject(e); }
+            });
+          }).on('error', reject);
+        });
+
+        const audio = (streamData.audioStreams || []).find(s => s.url);
+        if (audio && audio.url) {
+          console.log('[Stream Encontrado via Piped]: Redirecionando áudio');
+          return res.redirect(audio.url);
+        }
+      } catch (e) {}
+    }
+
+    res.status(502).send('Streams ocupados');
   } catch (err) {
+    console.error('[Erro get-audio]:', err.message);
     res.status(500).send(err.message);
   }
 });
+  }).catch(e => {
+    console.error(e);
+    if (!res.headersSent) res.status(500).send(e.message);
+  });
+});
+
 
 // Download do disco
 async function processAlbumDownload(albumData, albumFolder, slug) {

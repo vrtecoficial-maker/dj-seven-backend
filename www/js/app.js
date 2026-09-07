@@ -29,11 +29,14 @@ async function saveTrackAudioBlob(key, blob) {
 // BANCO DE DADOS LOCAL DO DISPOSITIVO (OFFLINE REAL)
 function openOfflineDB() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('DJSevenDB', 1);
+    const req = indexedDB.open('DJSevenAudioStore', 1);
     req.onupgradeneeded = (e) => {
       const db = e.target.result;
       if (!db.objectStoreNames.contains('albums')) {
         db.createObjectStore('albums', { keyPath: 'slug' });
+      }
+      if (!db.objectStoreNames.contains('audio_files')) {
+        db.createObjectStore('audio_files', { keyPath: 'trackKey' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -41,12 +44,31 @@ function openOfflineDB() {
   });
 }
 
+async function saveOfflineTrackAudio(trackKey, blob) {
+  const db = await openOfflineDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('audio_files', 'readwrite');
+    tx.objectStore('audio_files').put({ trackKey, blob });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getOfflineTrackAudio(trackKey) {
+  const db = await openOfflineDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction('audio_files', 'readonly');
+    const req = tx.objectStore('audio_files').get(trackKey);
+    req.onsuccess = () => resolve(req.result ? req.result.blob : null);
+    req.onerror = () => resolve(null);
+  });
+}
+
 async function saveAlbumOffline(album) {
   const db = await openOfflineDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction('albums', 'readwrite');
-    const store = tx.objectStore('albums');
-    store.put(album);
+    tx.objectStore('albums').put(album);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -54,12 +76,11 @@ async function saveAlbumOffline(album) {
 
 async function getOfflineAlbums() {
   const db = await openOfflineDB();
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const tx = db.transaction('albums', 'readonly');
-    const store = tx.objectStore('albums');
-    const req = store.getAll();
+    const req = tx.objectStore('albums').getAll();
     req.onsuccess = () => resolve(req.result || []);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => resolve([]);
   });
 }
 
@@ -409,44 +430,51 @@ galleryFile.addEventListener('change', (e) => handleImageFile(e.target.files[0])
 
 btnDownloadAlbum.addEventListener('click', async () => {
   if (!albumData || !albumData.title) {
-    alert('Nenhum disco carregado!');
+    alert('Nenhum disco carregado no prato!');
     return;
   }
+
   const slug = (albumData.slug || albumData.title).toLowerCase().replace(/[^a-z0-9]/g, '-');
   albumData.slug = slug;
-  trackStatusEl.innerHTML = '<span class="needle-icon">•</span> BAIXANDO PARA A MEMÓRIA DO CELULAR...';
 
-  try {
-    const allTracks = [...(albumData.sideA || []), ...(albumData.sideB || [])];
-    for (let i = 0; i < allTracks.length; i++) {
-      const t = allTracks[i];
-      const q = (t.performer || albumData.artist) + ' ' + (t.title || t.name) + ' audio original';
-      trackStatusEl.innerHTML = '<span class="needle-icon">•</span> BAIXANDO FAIXA ' + (i + 1) + '/' + allTracks.length + '...';
-      try {
-        const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 20000);
-      const resp = await fetch(activeBackend + '/api/get-audio?q=' + encodeURIComponent(q), { signal: controller.signal });
-      clearTimeout(timeoutId);
+  const tracksA = (albumData.sideA || []).map((t, i) => ({ ...t, side: 'A', index: i }));
+  const tracksB = (albumData.sideB || []).map((t, i) => ({ ...t, side: 'B', index: i }));
+  const allTracks = [...tracksA, ...tracksB];
+
+  let downloadedCount = 0;
+
+  for (let i = 0; i < allTracks.length; i++) {
+    const t = allTracks[i];
+    const trackKey = slug + '_' + t.side + '_' + t.index;
+    const trackName = t.title || t.name || ('Faixa ' + (i + 1));
+    trackStatusEl.innerHTML = '<span class="needle-icon">•</span> BAIXANDO ' + (i + 1) + '/' + allTracks.length + ': ' + trackName;
+
+    const query = (t.performer || albumData.artist) + ' ' + trackName + ' audio original';
+    
+    try {
+      // Baixa via backend
+      const resp = await fetch('https://dj-seven-backend.onrender.com/api/get-audio?q=' + encodeURIComponent(query));
       if (resp.ok) {
-        const blob = await resp.blob();
-        const base64Audio = await new Promise((res) => {
-          const reader = new FileReader();
-          reader.onloadend = () => res(reader.result);
-          reader.readAsDataURL(blob);
-        });
-        t.localUrl = base64Audio;
+        const audioBlob = await resp.blob();
+        if (audioBlob.size > 100000) { // Garante que não é payload vazio/erro
+          await saveOfflineTrackAudio(trackKey, audioBlob);
+          downloadedCount++;
+          continue;
+        }
       }
-      } catch (err) {
-        console.warn('Erro ao baixar faixa:', t.title, err);
-      }
+    } catch (e) {
+      console.warn('Erro ao baixar ' + trackName, e);
     }
+  }
 
-    await saveAlbumOffline(albumData);
-    trackStatusEl.innerHTML = '<span class="needle-icon">•</span> DISCO 100% OFFLINE SALVO!';
-    alert('Álbum completo e faixas baixadas! Pode colocar em Modo Avião e ouvir na Estante.');
-  } catch (e) {
-    console.error(e);
-    trackStatusEl.innerHTML = '<span class="needle-icon">•</span> ERRO NO DOWNLOAD';
+  await saveAlbumOffline(albumData);
+
+  if (downloadedCount > 0) {
+    trackStatusEl.innerHTML = '<span class="needle-icon">•</span> ' + downloadedCount + '/' + allTracks.length + ' FAIXAS SALVAS OFFLINE!';
+    alert('Download concluído! ' + downloadedCount + ' músicas foram salvas diretamente na memória do seu aparelho.');
+  } else {
+    trackStatusEl.innerHTML = '<span class="needle-icon">•</span> FALHA AO BAIXAR FAIXAS';
+    alert('Não foi possível obter os arquivos de áudio no momento. Verifique sua conexão.');
   }
 });
 
