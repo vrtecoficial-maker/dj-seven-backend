@@ -1,234 +1,353 @@
-const express = require('express');
-const multer = require('multer');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-const { GoogleGenAI } = require('@google/genai');
-const yts = require('yt-search');
-const { spawn } = require('child_process');
+let currentAlbum = null;
+let currentTrackIndex = 0;
+let currentSide = 'A';
+let isPlaying = false;
+let currentPlaylist = [];
 
-const app = express();
-const upload = multer({ dest: 'uploads/' });
-const ai = new GoogleGenAI();
-const PORT = process.env.PORT || 3000;
+document.addEventListener('DOMContentLoaded', () => {
+  initUI();
+  loadLibrary();
+});
 
-const LIBRARY_DIR = path.join(__dirname, 'library');
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
+function initUI() {
+  const btnScan = document.getElementById('btn-upload');
+  const coverInput = document.getElementById('cover-input');
+  const btnPlay = document.getElementById('btn-play');
+  const btnPrev = document.getElementById('btn-prev');
+  const btnNext = document.getElementById('btn-next');
+  const tabSideA = document.getElementById('tab-side-a');
+  const tabSideB = document.getElementById('tab-side-b');
+  const btnModeVinyl = document.getElementById('btn-mode-vinyl');
+  const btnModeCD = document.getElementById('btn-mode-cd');
+  const btnBooklet = document.getElementById('btn-view-booklet');
+  const btnCloseBooklet = document.getElementById('btn-close-booklet');
 
-if (!fs.existsSync(LIBRARY_DIR)) fs.mkdirSync(LIBRARY_DIR, { recursive: true });
-if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  if (btnScan && coverInput) {
+    btnScan.addEventListener('click', () => coverInput.click());
+    coverInput.addEventListener('change', handleCoverScan);
+  }
 
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-app.use(express.static('www'));
-app.use('/library', express.static(LIBRARY_DIR));
-app.use('/uploads', express.static(UPLOADS_DIR));
+  if (btnPlay) btnPlay.addEventListener('click', togglePlay);
+  if (btnPrev) btnPrev.addEventListener('click', prevTrack);
+  if (btnNext) btnNext.addEventListener('click', nextTrack);
 
-const ACTIVE_MODELS = [
-  'gemini-3.1-flash-lite',
-  'gemini-3.5-flash-lite',
-  'gemini-3.6-flash'
-];
+  if (tabSideA) tabSideA.addEventListener('click', () => switchSide('A'));
+  if (tabSideB) tabSideB.addEventListener('click', () => switchSide('B'));
 
-const scanCache = new Map();
+  if (btnModeVinyl) btnModeVinyl.addEventListener('click', () => setMode('vinyl'));
+  if (btnModeCD) btnModeCD.addEventListener('click', () => setMode('cd'));
 
-async function identifyCover(base64Image, mimeType) {
-  const hash = crypto.createHash('md5').update(base64Image.slice(0, 1000)).digest('hex');
-  if (scanCache.has(hash)) return scanCache.get(hash);
+  if (btnBooklet) btnBooklet.addEventListener('click', openBooklet);
+  if (btnCloseBooklet) btnCloseBooklet.addEventListener('click', closeBooklet);
 
-  const prompt = `Identifique exatamente este álbum de vinil e liste suas faixas originais.
-Retorne ESTRITAMENTE em formato JSON:
-{
-  "artist": "Nome do Artista",
-  "title": "Artista - Titulo",
-  "sideA": [{"title": "Faixa 1", "performer": "Nome", "duration": "3:20"}],
-  "sideB": [{"title": "Faixa 1 (Lado B)", "performer": "Nome", "duration": "3:20"}]
-}`;
+  // Criação do elemento de áudio nativo para gerenciar background e Media Session
+  let audioPlayer = document.getElementById('native-audio-element');
+  if (!audioPlayer) {
+    audioPlayer = document.createElement('audio');
+    audioPlayer.id = 'native-audio-element';
+    audioPlayer.addEventListener('ended', nextTrack);
+    document.body.appendChild(audioPlayer);
+  }
 
-  for (const modelName of ACTIVE_MODELS) {
-    try {
-      console.log('[IA Consultando]:', modelName);
-      const res = await ai.models.generateContent({
-        model: modelName,
-        contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { data: base64Image, mimeType: mimeType } }] }],
-        config: { responseMimeType: 'application/json' }
+  // Configuração da Media Session para manter o player ativo na tela de bloqueio do Android
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.setActionHandler('play', function() {
+      const audioEl = document.getElementById('native-audio-element');
+      if (audioEl) audioEl.play();
+      isPlaying = true;
+      if (btnPlay) btnPlay.textContent = '⏸';
+    });
+    navigator.mediaSession.setActionHandler('pause', function() {
+      const audioEl = document.getElementById('native-audio-element');
+      if (audioEl) audioEl.pause();
+      isPlaying = false;
+      if (btnPlay) btnPlay.textContent = '▶';
+    });
+    navigator.mediaSession.setActionHandler('previoustrack', prevTrack);
+    navigator.mediaSession.setActionHandler('nexttrack', nextTrack);
+  }
+}
+
+function updateLockScreenMeta(title, artist, coverUrl) {
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: title || 'DJ SEVEN',
+      artist: artist || 'Vinil Original',
+      album: currentAlbum ? currentAlbum.title : 'Acervo Exclusivo',
+      artwork: [
+        { src: coverUrl || '/uploads/last_scanned.jpg', sizes: '512x512', type: 'image/jpeg' }
+      ]
+    });
+  }
+}
+
+function setMode(mode) {
+  const vinylView = document.getElementById('vinyl-view');
+  const cdView = document.getElementById('cd-view');
+  const btnVinyl = document.getElementById('btn-mode-vinyl');
+  const btnCD = document.getElementById('btn-mode-cd');
+
+  if (mode === 'vinyl') {
+    if (vinylView) vinylView.classList.remove('hidden');
+    if (cdView) cdView.classList.add('hidden');
+    if (btnVinyl) btnVinyl.classList.add('active');
+    if (btnCD) btnCD.classList.remove('active');
+  } else {
+    if (vinylView) vinylView.classList.add('hidden');
+    if (cdView) cdView.classList.remove('hidden');
+    if (btnCD) btnCD.classList.add('active');
+    if (btnVinyl) btnVinyl.classList.remove('active');
+  }
+}
+
+async function handleCoverScan(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append('cover', file);
+
+  updateStatus('Digitalizando capa com IA...', 'Analisando prensagem e faixas originais');
+
+  try {
+    const res = await fetch('/api/scan', {
+      method: 'POST',
+      body: formData
+    });
+    const albumData = await res.json();
+
+    if (albumData.error) throw new Error(albumData.error);
+
+    loadAlbumToDeck(albumData);
+    loadLibrary();
+  } catch (err) {
+    console.error('Erro ao escanear:', err);
+    alert('Falha ao processar capa: ' + err.message);
+    updateStatus('Nenhum disco no prato', 'Aguardando seleção');
+  }
+}
+
+function loadAlbumToDeck(album) {
+  currentAlbum = album;
+  currentTrackIndex = 0;
+  currentSide = 'A';
+
+  const titleEl = document.getElementById('current-title');
+  const artistEl = document.getElementById('current-artist');
+  if (titleEl) titleEl.textContent = album.title || album.album;
+  if (artistEl) artistEl.textContent = album.artist || 'Artista Desconhecido';
+
+  renderTracklist();
+  playCurrentTrack();
+}
+
+function switchSide(side) {
+  currentSide = side;
+  currentTrackIndex = 0;
+  renderTracklist();
+  playCurrentTrack();
+}
+
+function renderTracklist() {
+  if (!currentAlbum) return;
+  const listContainer = document.getElementById('tracklist-items');
+  if (!listContainer) return;
+  listContainer.innerHTML = '';
+
+  const tracks = currentSide === 'A' ? (currentAlbum.sideA || []) : (currentAlbum.sideB || []);
+  const tabA = document.getElementById('tab-side-a');
+  const tabB = document.getElementById('tab-side-b');
+
+  if (currentSide === 'A') {
+    if (tabA) tabA.classList.add('active');
+    if (tabB) tabB.classList.remove('active');
+  } else {
+    if (tabB) tabB.classList.add('active');
+    if (tabA) tabA.classList.remove('active');
+  }
+
+  const sideIndicator = document.getElementById('current-side');
+  if (sideIndicator) {
+    sideIndicator.textContent = `LADO ${currentSide} • FAIXA ${currentTrackIndex + 1}`;
+  }
+
+  tracks.forEach((track, idx) => {
+    const li = document.createElement('li');
+    li.className = 'track-item' + (idx === currentTrackIndex ? ' playing' : '');
+    const trackName = typeof track === 'string' ? track : (track.title || `Faixa ${idx + 1}`);
+    li.innerHTML = `<span>${idx + 1}. ${trackName}</span>`;
+    li.addEventListener('click', () => {
+      currentTrackIndex = idx;
+      renderTracklist();
+      playCurrentTrack();
+    });
+    listContainer.appendChild(li);
+  });
+}
+
+function playCurrentTrack() {
+  if (!currentAlbum) return;
+  const tracks = currentSide === 'A' ? (currentAlbum.sideA || []) : (currentAlbum.sideB || []);
+  const trackObj = tracks[currentTrackIndex];
+  if (!trackObj) return;
+
+  const trackName = typeof trackObj === 'string' ? trackObj : trackObj.title;
+  const performer = (typeof trackObj === 'object' && trackObj.performer) ? trackObj.performer : currentAlbum.artist;
+  
+  const query = `${performer} ${trackName} audio`;
+  updateStatus(trackName, `${performer} • Carregando áudio...`);
+
+  const audioPlayer = document.getElementById('native-audio-element');
+  if (audioPlayer) {
+    audioPlayer.src = `/api/get-audio?q=${encodeURIComponent(query)}`;
+    audioPlayer.play()
+      .then(() => {
+        isPlaying = true;
+        const playBtn = document.getElementById('btn-play');
+        if (playBtn) playBtn.textContent = '⏸';
+        updateStatus(trackName, `${performer} • Tocando`);
+        updateLockScreenMeta(trackName, performer, currentAlbum.cover);
+      })
+      .catch(err => {
+        console.warn('Bloqueio de autoplay do navegador:', err);
+        isPlaying = false;
+        const playBtn = document.getElementById('btn-play');
+        if (playBtn) playBtn.textContent = '▶';
+        updateStatus(trackName, `${performer} • Toque em Play`);
       });
+  }
+}
 
-      if (res && res.text) {
-        let parsed = JSON.parse(res.text);
-        let rawA = parsed.sideA || parsed.ladoA || parsed.tracks || [];
-        let rawB = parsed.sideB || parsed.ladoB || [];
-
-        if (rawB.length === 0 && rawA.length > 2) {
-          const mid = Math.ceil(rawA.length / 2);
-          rawB = rawA.slice(mid);
-          rawA = rawA.slice(0, mid);
+function togglePlay() {
+  if (!currentAlbum) {
+    fetch('/api/library')
+      .then(res => res.json())
+      .then(library => {
+        if (library.length > 0) {
+          loadAlbumToDeck(library[0]);
+        } else {
+          alert('Escaneie uma capa de disco primeiro!');
         }
-
-        const formatTrack = (t, i) => ({
-          title: typeof t === 'string' ? t : (t.title || t.name || `Faixa ${i + 1}`),
-          performer: (typeof t === 'object' && t.performer) ? t.performer : parsed.artist,
-          duration: (typeof t === 'object' && t.duration) ? t.duration : '3:30'
-        });
-
-        parsed.sideA = rawA.map((t, i) => formatTrack(t, i));
-        parsed.sideB = rawB.map((t, i) => formatTrack(t, i));
-
-        if (parsed.sideA.length === 0) parsed.sideA = [{ title: 'Faixa 1', performer: parsed.artist, duration: '3:30' }];
-        if (parsed.sideB.length === 0) parsed.sideB = [{ title: 'Faixa 1 (Lado B)', performer: parsed.artist, duration: '3:30' }];
-
-        scanCache.set(hash, parsed);
-        return parsed;
-      }
-    } catch (e) {
-      console.warn('[Aviso]', modelName, 'falhou:', e.message);
-    }
+      });
+    return;
   }
 
-  throw new Error('Falha no reconhecimento da capa');
+  const audioPlayer = document.getElementById('native-audio-element');
+  if (!audioPlayer) return;
+
+  if (isPlaying) {
+    audioPlayer.pause();
+    isPlaying = false;
+    const playBtn = document.getElementById('btn-play');
+    if (playBtn) playBtn.textContent = '▶';
+  } else {
+    audioPlayer.play()
+      .then(() => {
+        isPlaying = true;
+        const playBtn = document.getElementById('btn-play');
+        if (playBtn) playBtn.textContent = '⏸';
+      })
+      .catch(() => {
+        playCurrentTrack();
+      });
+  }
 }
 
-app.post('/api/scan', upload.single('cover'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'Sem imagem' });
-  const imagePath = req.file.path;
-
-  try {
-    fs.copyFileSync(imagePath, path.join(__dirname, 'last_scanned.jpg'));
-    const imageBytes = fs.readFileSync(imagePath);
-    const result = await identifyCover(imageBytes.toString('base64'), req.file.mimetype || 'image/jpeg');
-
-    if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
-    console.log('[Prensagem Identificada]:', result.title);
-    res.json(result);
-  } catch (error) {
-    if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
-    console.error('[Erro no Scan]:', error.message);
-    res.status(500).json({ error: error.message });
+function nextTrack() {
+  if (!currentAlbum) return;
+  const tracks = currentSide === 'A' ? (currentAlbum.sideA || []) : (currentAlbum.sideB || []);
+  if (currentTrackIndex < tracks.length - 1) {
+    currentTrackIndex++;
+    renderTracklist();
+    playCurrentTrack();
+  } else if (currentSide === 'A' && (currentAlbum.sideB || []).length > 0) {
+    switchSide('B');
   }
-});
-
-function makeSlug(name) {
-  return (name || 'album')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
 }
 
-// Rota de entrega direta de áudio (local via yt-dlp ou fallback)
-app.get('/api/get-audio', async (req, res) => {
-  const query = req.query.q;
-  if (!query) return res.status(400).send('Query ausente');
-  console.log('[Download Requisitado]:', query);
-
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Content-Type', 'audio/mpeg');
-
-  try {
-    const searchRes = await yts(query);
-    const video = searchRes.videos && searchRes.videos[0];
-    if (!video) {
-      console.log('[Vídeo não encontrado]:', query);
-      return res.status(404).send('Vídeo não encontrado');
-    }
-
-    console.log('[Extraindo Áudio]:', video.title);
-    const proc = spawn('yt-dlp', ['-x', '--audio-format', 'mp3', '-o', '-', video.url]);
-
-    proc.stdout.pipe(res);
-    proc.stderr.on('data', d => {
-      const msg = d.toString();
-      if (msg.includes('%')) console.log('[yt-dlp]:', msg.trim());
-    });
-
-    proc.on('error', err => {
-      console.error('[Erro yt-dlp]:', err.message);
-      if (!res.headersSent) res.status(500).send(err.message);
-    });
-  } catch (err) {
-    console.error('[Erro busca]:', err.message);
-    if (!res.headersSent) res.status(500).send(err.message);
+function prevTrack() {
+  if (!currentAlbum) return;
+  if (currentTrackIndex > 0) {
+    currentTrackIndex--;
+    renderTracklist();
+    playCurrentTrack();
   }
-});
+}
 
-app.post('/api/download-album', (req, res) => {
+function updateStatus(title, artist) {
+  const titleEl = document.getElementById('current-title');
+  const artistEl = document.getElementById('current-artist');
+  if (titleEl) titleEl.textContent = title;
+  if (artistEl) artistEl.textContent = artist;
+}
+
+async function loadLibrary() {
   try {
-    const albumData = req.body;
-    if (!albumData || !albumData.title) return res.status(400).json({ error: 'Dados inválidos' });
+    const res = await fetch('/api/library');
+    const library = await res.json();
+    const shelfGrid = document.getElementById('shelf-items');
+    if (!shelfGrid) return;
+    shelfGrid.innerHTML = '';
 
-    const slug = makeSlug(albumData.slug || albumData.title);
-    const albumFolder = path.join(LIBRARY_DIR, slug);
-    if (!fs.existsSync(albumFolder)) fs.mkdirSync(albumFolder, { recursive: true });
+    const countVinyl = document.getElementById('count-vinyl');
+    const countCD = document.getElementById('count-cd');
+    if (countVinyl) countVinyl.textContent = library.length;
+    if (countCD) countCD.textContent = '0';
 
-    const lastCover = path.join(__dirname, 'last_scanned.jpg');
-    if (fs.existsSync(lastCover)) {
-      fs.copyFileSync(lastCover, path.join(albumFolder, 'cover.jpg'));
-      albumData.cover = `/library/${slug}/cover.jpg`;
+    library.forEach((album) => {
+      const card = document.createElement('div');
+      card.className = 'shelf-card';
+      card.innerHTML = `
+        <img src="${album.cover || '/uploads/last_scanned.jpg'}" alt="${album.title}">
+        <div class="shelf-card-info">
+          <h4>${album.title}</h4>
+          <p>${album.artist}</p>
+        </div>
+      `;
+      card.addEventListener('click', () => {
+        loadAlbumToDeck(album);
+      });
+      shelfGrid.appendChild(card);
+    });
+
+    if (library.length > 0 && !currentAlbum) {
+      loadAlbumToDeck(library[0]);
     }
-
-    albumData.slug = slug;
-    fs.writeFileSync(path.join(albumFolder, 'manifest.json'), JSON.stringify(albumData, null, 2));
-    res.json({ success: true, slug: slug });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('Erro ao carregar estante:', e);
   }
-});
+}
 
-app.get('/api/library', (req, res) => {
-  try {
-    const albums = [];
-    fs.readdirSync(LIBRARY_DIR).forEach(folder => {
-      const p = path.join(LIBRARY_DIR, folder, 'manifest.json');
-      if (fs.existsSync(p)) {
-        try { albums.push(JSON.parse(fs.readFileSync(p, 'utf-8'))); } catch (e) {}
-      }
-    });
-    res.json(albums);
-  } catch (err) {
-    res.status(500).json({ error: 'Erro na estante' });
+function openBooklet() {
+  if (!currentAlbum) {
+    alert('Nenhum álbum selecionado.');
+    return;
   }
-});
+  const titleEl = document.getElementById('booklet-title');
+  const artistEl = document.getElementById('booklet-artist');
+  const labelEl = document.getElementById('booklet-label');
+  const imgEl = document.getElementById('booklet-display-img');
+  const textEl = document.getElementById('booklet-content-text');
 
-app.delete('/api/library/:slug', (req, res) => {
-  try {
-    const folderPath = path.join(LIBRARY_DIR, req.params.slug);
-    if (fs.existsSync(folderPath)) {
-      fs.rmSync(folderPath, { recursive: true, force: true });
-      return res.json({ success: true });
-    }
-    res.status(404).json({ error: 'Disco não encontrado' });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  if (titleEl) titleEl.textContent = currentAlbum.title;
+  if (artistEl) artistEl.textContent = currentAlbum.artist;
+  if (labelEl) labelEl.textContent = 'Prensagem Original Analisada por IA';
+  if (imgEl) imgEl.src = currentAlbum.cover || '/uploads/last_scanned.jpg';
+  
+  if (textEl) {
+    textEl.innerHTML = `
+      <h3>Lado A:</h3>
+      <p>${(currentAlbum.sideA || []).map((t, i) => `${i+1}. ${t.title || t}`).join('<br>')}</p>
+      <hr>
+      <h3>Lado B:</h3>
+      <p>${(currentAlbum.sideB || []).map((t, i) => `${i+1}. ${t.title || t}`).join('<br>')}</p>
+    `;
   }
-});
+  const modal = document.getElementById('booklet-modal');
+  if (modal) modal.classList.remove('hidden');
+}
 
-app.get('/api/search', async (req, res) => {
-  const query = req.query.q;
-  if (!query) return res.status(400).json({ error: 'Sem busca' });
-
-  try {
-    const results = await yts(query);
-    const video = results.videos && results.videos[0];
-    if (!video) return res.status(404).json({ error: 'Vídeo não encontrado' });
-
-    res.json({
-      title: video.title,
-      videoId: video.videoId,
-      thumbnail: video.thumbnail
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.use((req, res) => {
-  res.sendFile(path.join(__dirname, 'www', 'index.html'));
-});
-
-app.listen(PORT, () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
-});
+function closeBooklet() {
+  const modal = document.getElementById('booklet-modal');
+  if (modal) modal.classList.add('hidden');
+}
